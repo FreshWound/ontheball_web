@@ -45,14 +45,11 @@ not tied to the map style, which is why this wasn't obvious.) Fixed by
 caching the last-received overlay/warnings data and replaying it once
 the new style finishes loading.
 
-**Known gap, not yet addressed**: `map.html` now loads
-`js/qwebchannel.js`, `js/maplibre-gl.js`, and `js/maplibre-gl.css` from
-a local `assets/js/` folder instead of the CDN-hosted ES module bundle
-used in earlier versions. That folder isn't part of this delivery — it
-wasn't included in what was shared back, and this environment has no
-way to verify its exact contents. If the app is running correctly with
-it already in place, no action needed; flagging only in case that
-folder ever needs to be reconstructed or is missing on a fresh checkout.
+**Local JS assets**: `map.html` loads `qwebchannel.js`, `maplibre-gl.js`,
+and `maplibre-gl.css` from `assets/js/` — confirmed present and
+committed to the repo (`assets/js/qwebchannel.js`, `assets/js/maplibre-gl.js`,
+`assets/js/maplibre-gl.css`), so a fresh clone of the repo has everything
+it needs with no separate download step.
 
 ## What's new in v0.6.2 — velocity dealiasing fix, round 2
 
@@ -496,10 +493,15 @@ no API key.
 ## Files
 
 - `ontheball_web.py` — main PyQt6 app (window, controls, QWebChannel bridge)
-- `radar_source.py` — fetch/decode/grid/render pipeline, same gatefilter
-  logic as before, now outputting a georeferenced PNG + corner coordinates
-  instead of a full matplotlib figure
-- `assets/map.html` — the MapLibre GL page (basemap + radar image overlay
-  + range rings/home marker), driven from Python via QWebChannel
-- `assets/maplibre-gl*.mjs`, `assets/maplibre-gl.css` — local MapLibre GL
-  bundle (no CDN dependency)
+- `radar_source.py` — fetch/decode/grid/render pipeline: independent
+  gatefilters per product, velocity dealiasing, NWS warnings fetch,
+  outputs a georeferenced PNG + corner coordinates per product
+- `assets/map.html` — the MapLibre GL page (basemap + radar image
+  overlay(s) + station/home markers + NWS warnings), driven from Python
+  via QWebChannel
+- `assets/js/maplibre-gl.js`, `assets/js/maplibre-gl.css`,
+  `assets/js/qwebchannel.js` — local JS bundle map.html loads directly
+  (no CDN dependency, no separate download needed after cloning the repo)
+- `diagnostics/inspect_suspect_echo.py` — standalone script for
+  inspecting raw radar moments in a specific lat/lon box, useful if a
+  future rendering discrepancy needs investigating against real data
