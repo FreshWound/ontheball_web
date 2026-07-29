@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ontheball Radar Map</title>
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <script src="js/qwebchannel.js"></script>
+  <script src="js/maplibre-gl.js"></script>
+  <link href="js/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    body { margin: 0; padding: 0; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    
+    /* Branding Overlay */
+    #brand-logo-container {
+      position: absolute;
+      bottom: 110px;
+      right: 14px;
+      z-index: 1000;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    #brand-logo {
+      width: 140px;
+      height: auto;
+      filter: drop-shadow(0px 4px 10px rgba(0, 0, 0, 0.85));
+      opacity: 0.95;
+    }
+
+    #brand-author {
+      margin-top: 4px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: #a0b0c0;
+      text-shadow: 0px 2px 4px rgba(0, 0, 0, 0.9);
+      background: rgba(18, 22, 28, 0.85);
+      padding: 2px 8px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    /* On-Map Layer Control Toggle */
+    #layer-control {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1000;
+      background: rgba(18, 22, 28, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 11px;
+      color: #e0e6ed;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+    }
+    #layer-control input {
+      cursor: pointer;
+      accent-color: #0088ff;
+    }
+
+    /* Legend Box */
+    #legend-container {
+      position: absolute;
+      bottom: 24px;
+      right: 10px;
+      background: rgba(18, 22, 28, 0.92);
+      color: #e0e6ed;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 11px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+      display: block;
+      z-index: 1000;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      min-width: 280px;
+    }
+    .legend-bar {
+      height: 12px;
+      width: 100%;
+      border-radius: 3px;
+      margin-top: 6px;
+      margin-bottom: 6px;
+      border: 1px solid rgba(0,0,0,0.5);
+    }
+    .legend-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: #a0b0c0;
+      font-weight: 500;
+    }
+
+    /* Map Markers */
+    .radar-marker {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #e63946;
+      border: 2px solid #ffffff;
+      box-shadow: 0 0 8px rgba(0,0,0,0.8);
+      cursor: pointer;
+      pointer-events: auto !important;
+      z-index: 9999;
+    }
+    .radar-marker:hover {
+      transform: scale(1.3);
+      background: #ff4d5a;
+    }
+
+    .home-marker {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #0088ff;
+      border: 2px solid #ffffff;
+      box-shadow: 0 0 10px rgba(0, 136, 255, 0.8);
+      cursor: pointer;
+      pointer-events: auto !important;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 12px;
+      font-weight: bold;
+      z-index: 9999;
+    }
+    .home-marker:hover {
+      transform: scale(1.3);
+      background: #33a0ff;
+    }
+
+    /* Warning Popup Styling */
+    .maplibregl-popup-content {
+      background: rgba(18, 22, 28, 0.95) !important;
+      color: #ffffff !important;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 6px;
+      padding: 12px 14px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.7);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .maplibregl-popup-anchor-bottom .maplibregl-popup-tip {
+      border-top-color: rgba(18, 22, 28, 0.95) !important;
+    }
+    .warning-title {
+      font-weight: bold;
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    .warning-body {
+      font-size: 11px;
+      color: #c0c8d0;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <!-- On-Map Warnings Toggle Control -->
+  <label id="layer-control">
+    <input type="checkbox" id="warning-toggle" checked onchange="toggleWarningVisibility(this.checked)">
+    <span>Show NWS Warnings</span>
+  </label>
+
+  <!-- App Logo & Developer Credit -->
+  <div id="brand-logo-container">
+    <img id="brand-logo" src="img/logo.png" alt="ON THE BALL Radar Program" />
+    <div id="brand-author">Developed by Joshua Thrush</div>
+  </div>
+
+  <!-- Dynamic Legend Container -->
+  <div id="legend-container">
+    <div id="legend-title" style="font-weight: bold; font-size: 12px;">Reflectivity</div>
+    <div id="legend-bar" class="legend-bar"></div>
+    <div id="legend-labels" class="legend-labels"></div>
+  </div>
+
+  <script>
+    const STYLES = {
+      dark: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+      light: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json'
+    };
+
+    const HOME_COORDS = [-85.3255, 41.9589];
+
+    let currentOpacity = 0.3;
+    let currentLayersCount = 0;
+    let mapMarkers = [];
+    let warningsVisible = true;
+
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: STYLES.dark,
+      center: [-85.3255, 42.1000],
+      zoom: 7.8,
+      trackResize: true,
+      fadeDuration: 0
+    });
+
+    map.addControl(new maplibregl.NavigationControl());
+
+    function prioritizePlaceLabels() {
+      const style = map.getStyle();
+      if (!style || !style.layers) return;
+      style.layers.forEach(layer => {
+        if (layer.type === 'symbol' && (layer.id.includes('place') || layer.id.includes('label') || layer.id.includes('town'))) {
+          map.setLayerZoomRange(layer.id, 0, 24);
+        }
+      });
+    }
+
+    map.on('style.load', prioritizePlaceLabels);
+
+    // Dynamic Default Gradients & Detailed Labels for Py-ART Products
+    function renderFallbackLegend(product, title) {
+      const container = document.getElementById('legend-container');
+      const titleEl = document.getElementById('legend-title');
+      const barEl = document.getElementById('legend-bar');
+      const labelsEl = document.getElementById('legend-labels');
+
+      const prodKey = (product || '').toUpperCase();
+      let gradient = '';
+      let labels = [];
+
+      if (prodKey === 'BV' || prodKey.includes('VELOCITY')) {
+        titleEl.innerText = title || 'Base Velocity (Wind Speed)';
+        gradient = 'linear-gradient(to right, #00ff00 0%, #005500 40%, #444444 50%, #550000 60%, #ff0000 100%)';
+        labels = ['-60 MPH (In)', '-30 MPH', '0', '+30 MPH', '+60 MPH (Out)'];
+      } else if (prodKey === 'CC' || prodKey.includes('CORRELATION')) {
+        titleEl.innerText = title || 'Correlation Coeff (ρHV)';
+        gradient = 'linear-gradient(to right, #444444 0%, #0000ff 30%, #00ff00 60%, #ffff00 85%, #ff0000 100%)';
+        labels = ['0.40 (Debris)', '0.65', '0.85', '0.95', '1.00 (Rain/Snow)'];
+      } else {
+        // Default: Reflectivity / BR
+        titleEl.innerText = title || 'Reflectivity (dBZ)';
+        gradient = 'linear-gradient(to right, #00ecec 0%, #00a000 20%, #ffff00 45%, #ff0000 70%, #ff00ff 90%, #ffffff 100%)';
+        labels = ['10 dBZ (Light)', '25 dBZ', '40 dBZ', '55 dBZ', '70+ dBZ (Hail)'];
+      }
+
+      barEl.style.background = gradient;
+      labelsEl.innerHTML = '';
+      labels.forEach(lbl => {
+        const span = document.createElement('span');
+        span.innerText = lbl;
+        labelsEl.appendChild(span);
+      });
+
+      container.style.display = 'block';
+    }
+
+    function toggleWarningVisibility(visible) {
+      warningsVisible = visible;
+      const visibility = warningsVisible ? 'visible' : 'none';
+      if (map.getLayer('nws-warnings-fill')) {
+        map.setLayoutProperty('nws-warnings-fill', 'visibility', visibility);
+      }
+      if (map.getLayer('nws-warnings-line')) {
+        map.setLayoutProperty('nws-warnings-line', 'visibility', visibility);
+      }
+    }
+
+    new QWebChannel(qt.webChannelTransport, function(channel) {
+      window.bridge = channel.objects.bridge;
+
+      if (bridge.basemapChanged) {
+        bridge.basemapChanged.connect(function(styleKey) {
+          if (STYLES[styleKey]) {
+            map.setStyle(STYLES[styleKey]);
+          }
+        });
+      }
+
+      if (bridge.opacityChanged) {
+        bridge.opacityChanged.connect(function(val) {
+          currentOpacity = val / 100.0;
+          for (let i = 0; i < currentLayersCount; i++) {
+            if (map.getLayer(`radar-layer-${i}`)) {
+              map.setPaintProperty(`radar-layer-${i}`, 'raster-opacity', currentOpacity);
+            }
+          }
+        });
+      }
+
+      if (bridge.toggleWarningsChanged) {
+        bridge.toggleWarningsChanged.connect(function(visible) {
+          const checkbox = document.getElementById('warning-toggle');
+          if (checkbox) checkbox.checked = visible;
+          toggleWarningVisibility(visible);
+        });
+      }
+
+      function clearMarkers() {
+        mapMarkers.forEach(m => m.remove());
+        mapMarkers = [];
+      }
+
+      function addHomeMarker() {
+        const homeEl = document.createElement('div');
+        homeEl.className = 'home-marker';
+        homeEl.innerHTML = '⌂';
+        homeEl.title = 'HOME — Dual Radar (KGRR + KIWX)';
+
+        homeEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (window.bridge) {
+            window.bridge.selectStation('HOME');
+          }
+        });
+
+        const m = new maplibregl.Marker({ element: homeEl })
+          .setLngLat(HOME_COORDS)
+          .addTo(map);
+        
+        mapMarkers.push(m);
+      }
+
+      addHomeMarker();
+
+      if (bridge.stationsReady) {
+        bridge.stationsReady.connect(function(jsonStr) {
+          clearMarkers();
+          addHomeMarker();
+
+          const stations = JSON.parse(jsonStr);
+          stations.forEach(st => {
+            const el = document.createElement('div');
+            el.className = 'radar-marker';
+            el.title = `${st.code} — ${st.name}`;
+
+            el.addEventListener('click', (e) => {
+              e.stopPropagation();
+              if (window.bridge) {
+                window.bridge.selectStation(st.code);
+              }
+            });
+
+            const m = new maplibregl.Marker({ element: el })
+              .setLngLat([st.lon, st.lat])
+              .addTo(map);
+
+            mapMarkers.push(m);
+          });
+        });
+      }
+
+      if (bridge.overlaysReady) {
+        bridge.overlaysReady.connect(function(jsonStr, meta) {
+          const items = JSON.parse(jsonStr);
+
+          for (let i = 0; i < currentLayersCount; i++) {
+            if (map.getLayer(`radar-layer-${i}`)) map.removeLayer(`radar-layer-${i}`);
+            if (map.getSource(`radar-src-${i}`)) map.removeSource(`radar-src-${i}`);
+          }
+
+          currentLayersCount = items.length;
+
+          items.forEach((item, idx) => {
+            const srcId = `radar-src-${idx}`;
+            const layerId = `radar-layer-${idx}`;
+
+            map.addSource(srcId, {
+              type: 'image',
+              url: 'data:image/png;base64,' + item.png_b64,
+              coordinates: item.coordinates
+            });
+
+            map.addLayer({
+              id: layerId,
+              type: 'raster',
+              source: srcId,
+              paint: {
+                'raster-opacity': currentOpacity,
+                'raster-fade-duration': 0
+              }
+            });
+          });
+        });
+      }
+
+      if (bridge.legendReady) {
+        bridge.legendReady.connect(function(jsonStr) {
+          if (!jsonStr || jsonStr === 'null' || jsonStr === 'None') {
+            renderFallbackLegend('BR', 'Reflectivity (dBZ)');
+            return;
+          }
+
+          let leg = {};
+          try {
+            leg = JSON.parse(jsonStr);
+          } catch (e) {
+            console.warn("Could not parse incoming legend spec, utilizing product fallback.");
+          }
+
+          const product = leg.product || 'BR';
+          const title = leg.title || leg.label || 'Radar Scale';
+
+          renderFallbackLegend(product, title);
+        });
+      }
+
+      if (bridge.warningsReady) {
+        bridge.warningsReady.connect(function(jsonStr) {
+          const geojson = JSON.parse(jsonStr);
+          
+          if (map.getSource('nws-warnings')) {
+            map.getSource('nws-warnings').setData(geojson);
+          } else {
+            map.addSource('nws-warnings', {
+              type: 'geojson',
+              data: geojson
+            });
+
+            map.addLayer({
+              id: 'nws-warnings-fill',
+              type: 'fill',
+              source: 'nws-warnings',
+              layout: {
+                'visibility': warningsVisible ? 'visible' : 'none'
+              },
+              paint: {
+                'fill-color': [
+                  'match',
+                  ['get', 'event'],
+                  'Tornado Warning', '#ff0000',
+                  'Severe Thunderstorm Warning', '#ffff00',
+                  'Flash Flood Warning', '#00ff00',
+                  'Special Marine Warning', '#00ffff',
+                  'Marine Warning', '#a0a0a0',
+                  '#888888'
+                ],
+                'fill-opacity': 0.25
+              }
+            });
+
+            map.addLayer({
+              id: 'nws-warnings-line',
+              type: 'line',
+              source: 'nws-warnings',
+              layout: {
+                'visibility': warningsVisible ? 'visible' : 'none'
+              },
+              paint: {
+                'line-color': [
+                  'match',
+                  ['get', 'event'],
+                  'Tornado Warning', '#ff0000',
+                  'Severe Thunderstorm Warning', '#ffff00',
+                  'Flash Flood Warning', '#00ff00',
+                  'Special Marine Warning', '#00ffff',
+                  'Marine Warning', '#d0d0d0',
+                  '#888888'
+                ],
+                'line-width': 2
+              }
+            });
+
+            map.on('mouseenter', 'nws-warnings-fill', () => {
+              map.getCanvas().style.cursor = 'pointer';
+            });
+
+            map.on('mouseleave', 'nws-warnings-fill', () => {
+              map.getCanvas().style.cursor = '';
+            });
+
+            map.on('click', 'nws-warnings-fill', (e) => {
+              if (!e.features || !e.features.length) return;
+              
+              const feature = e.features[0];
+              const props = feature.properties || {};
+
+              const eventName = props.event || props.event_name || 'NWS Warning';
+              const headline = props.headline || props.summary || 'Active Weather Alert';
+              const expires = props.expires || props.expiration || 'N/A';
+              const severity = props.severity || 'N/A';
+
+              let eventColor = '#ffff00';
+              if (eventName.includes('Tornado')) eventColor = '#ff0000';
+              else if (eventName.includes('Flood')) eventColor = '#00ff00';
+              else if (eventName.includes('Marine')) eventColor = '#00ffff';
+
+              const popupContent = `
+                <div class="warning-title" style="color: ${eventColor};">${eventName}</div>
+                <div class="warning-body">
+                  <strong>Severity:</strong> ${severity}<br/>
+                  <strong>Expires:</strong> ${expires}<br/>
+                  <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 6px 0;" />
+                  ${headline}
+                </div>
+              `;
+
+              new maplibregl.Popup()
+                .setLngLat(e.lngLat)
+                .setHTML(popupContent)
+                .addTo(map);
+            });
+          }
+        });
+      }
+
+      renderFallbackLegend('BR', 'Reflectivity (dBZ)');
+      if (bridge.jsReady) {
+        bridge.jsReady();
+      }
+    });
+  </script>
+</body>
+</html>
