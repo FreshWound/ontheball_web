@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.7.7)
+# ontheball — web basemap prototype (v0.7.8)
 
 ## Install (one-time)
 
@@ -66,6 +66,24 @@ to a specific one if a change ever needs rolling back. The `__version__`
 string in `ontheball_web.py` and the version in this title still get
 bumped each notable change, just as a quick human-readable marker
 alongside the commit history — not as the primary safety net anymore.
+
+## What's new in v0.7.8 — Clear Home + cadence-based auto-refresh
+
+- **Clear Home button** next to Set Home — resets home lat/lon, drops
+  back to whatever's in the Station dropdown, clears the distance
+  readout, and removes the home marker from the map. Also cancels a
+  pending "click the map" arm if you hit Clear Home mid-selection.
+- **Auto-refresh replaced with a simple on/off checkbox.** Instead of
+  picking a fixed 2/5/10 min interval, it now measures the actual gap
+  between consecutive volumes for whatever station(s) are active
+  (parsed straight from each volume's own timestamp) and refreshes on
+  that real cadence, plus a 30-second buffer since a volume takes a
+  moment to actually land in S3 after the scan finishes. For a
+  multi-station Home view, it uses the fastest-cycling station among
+  them so a quicker site never gets missed. Starts at a 5-minute guess
+  until two real volumes come in to measure from, then keeps adjusting
+  if a station's mode/cadence changes (e.g. switching between clear-air
+  and precip VCPs).
 
 ## What's new in v0.7.7 — station-click regression fixed + click-to-set-home
 

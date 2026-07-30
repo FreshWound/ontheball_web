@@ -358,6 +358,15 @@
         });
       }
 
+      if (bridge.homeMarkerCleared) {
+        bridge.homeMarkerCleared.connect(function() {
+          if (homeMarker) {
+            homeMarker.remove();
+            homeMarker = null;
+          }
+        });
+      }
+
       // Click-to-set-home: Python arms/disarms this via armHomeSelection;
       // while armed, the next map click (that isn't on a marker, which
       // stops propagation itself) reports its lat/lon back as the new home.

@@ -11,14 +11,16 @@ Run: python3 ontheball_web.py
 import functools
 import http.server
 import json
+import re
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QIcon, QDoubleValidator
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QSlider, QStatusBar, QVBoxLayout, QWidget,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -27,16 +29,37 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.7.7"
+__version__ = "0.7.8"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
 HTTP_PORT = 8765
 
-AUTO_REFRESH_OPTIONS = {"Off": 0, "1 min": 60, "2 min": 120, "5 min": 300, "10 min": 600}
 MAX_HISTORY = 12          # cap on cached in-session frames
 PLAYBACK_FRAME_MS = 600   # time each frame stays on screen during playback
 HOME_STATION_COUNT = 3    # how many closest stations to load when Home Location is set
+DEFAULT_REFRESH_INTERVAL_SEC = 300   # used until we've measured a station's actual cadence
+MIN_REFRESH_INTERVAL_SEC = 60        # floor, so a fast-cycling station can't cause hammering
+MAX_REFRESH_INTERVAL_SEC = 900       # ceiling, in case of a bad/stale reading
+REFRESH_BUFFER_SEC = 30              # extra margin added to the measured cadence — volumes
+                                      # take a little time to actually land in S3 after the
+                                      # scan finishes, so refreshing at exactly the measured
+                                      # interval can still catch the previous (stale) volume
+
+_VOLUME_TIME_RE = re.compile(r"(\d{8})_(\d{6})")
+
+
+def _parse_volume_datetime(volume_time: str):
+    """Extract the actual scan datetime (UTC) from a volume_time string like
+    'KGRR20260727_113656_V06'. Returns None for anything that doesn't match
+    (e.g. synthetic-demo placeholders), so callers can just skip those."""
+    m = _VOLUME_TIME_RE.search(volume_time)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def start_local_server(directory: Path, port: int):
@@ -96,6 +119,7 @@ class Bridge(QObject):
     warningsReady = pyqtSignal(str)              # JSON GeoJSON FeatureCollection
     cursorMoved = pyqtSignal(float, float)       # (lat, lon) under the mouse, for the distance-from-home readout
     homeMarkerReady = pyqtSignal(str)            # JSON {lat, lon} once a home location is set
+    homeMarkerCleared = pyqtSignal()             # fired when Clear Home is clicked
     armHomeSelection = pyqtSignal(bool)          # True = enter "click the map to set home" mode, False = cancel
     homeLocationClicked = pyqtSignal(float, float)  # fired when the map is clicked while armed
 
@@ -134,6 +158,13 @@ class MainWindow(QMainWindow):
         self.home_lat: float | None = None
         self.home_lon: float | None = None
         self.home_active_stations: list | None = None
+
+        # Auto-refresh timing: measured from the actual gap between
+        # consecutive volumes per station, rather than a fixed dropdown
+        # interval. Starts at a reasonable guess and self-corrects once
+        # real data starts coming in.
+        self.last_volume_dt: dict = {}
+        self.auto_refresh_interval_sec: int = DEFAULT_REFRESH_INTERVAL_SEC
 
         self.history: list = []
         self.history_index: int = -1
@@ -187,10 +218,9 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.refresh_btn)
 
         controls.addWidget(QLabel("Auto-refresh:"))
-        self.auto_combo = QComboBox()
-        self.auto_combo.addItems(list(AUTO_REFRESH_OPTIONS.keys()))
-        self.auto_combo.currentTextChanged.connect(self.on_auto_refresh_changed)
-        controls.addWidget(self.auto_combo)
+        self.auto_refresh_checkbox = QCheckBox()
+        self.auto_refresh_checkbox.toggled.connect(self.on_auto_refresh_toggled)
+        controls.addWidget(self.auto_refresh_checkbox)
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -215,6 +245,10 @@ class MainWindow(QMainWindow):
         self.set_home_btn = QPushButton("Set Home")
         self.set_home_btn.clicked.connect(self.on_set_home_clicked)
         home_controls.addWidget(self.set_home_btn)
+
+        self.clear_home_btn = QPushButton("Clear Home")
+        self.clear_home_btn.clicked.connect(self.on_clear_home_clicked)
+        home_controls.addWidget(self.clear_home_btn)
 
         self.home_status_label = QLabel("Home not set — type lat/lon, or leave both blank and click Set Home to pick a spot on the map")
         home_controls.addWidget(self.home_status_label)
@@ -293,10 +327,9 @@ class MainWindow(QMainWindow):
     def current_product(self) -> str:
         return self.product_combo.currentData()
 
-    def on_auto_refresh_changed(self, label: str):
-        seconds = AUTO_REFRESH_OPTIONS[label]
-        if seconds:
-            self.auto_timer.start(seconds * 1000)
+    def on_auto_refresh_toggled(self, checked: bool):
+        if checked:
+            self.auto_timer.start(self.auto_refresh_interval_sec * 1000)
         else:
             self.auto_timer.stop()
 
@@ -358,6 +391,19 @@ class MainWindow(QMainWindow):
         self.reset_history()
         self.refresh_now()
 
+    def on_clear_home_clicked(self):
+        self._disarm_home_selection()
+        self.home_lat = None
+        self.home_lon = None
+        self.home_active_stations = None
+        self.home_lat_input.clear()
+        self.home_lon_input.clear()
+        self.distance_label.setText("")
+        self.home_status_label.setText("Home not set — type lat/lon, or leave both blank and click Set Home to pick a spot on the map")
+        self.bridge.homeMarkerCleared.emit()
+        self.reset_history()
+        self.refresh_now()
+
     def on_cursor_moved(self, lat: float, lon: float):
         if self.home_lat is None or self.home_lon is None:
             return
@@ -407,7 +453,33 @@ class MainWindow(QMainWindow):
             self.warnings_worker.finished_ok.connect(self.on_warnings_ready)
             self.warnings_worker.start()
 
+    def _update_measured_refresh_interval(self, overlays: list):
+        """Update self.auto_refresh_interval_sec from the real gap between this
+        fetch's volume(s) and the previous one for the same station(s), so
+        auto-refresh follows each radar's actual scan cadence instead of a
+        fixed guess. Uses the fastest (minimum) cadence among active stations,
+        so a multi-station Home view doesn't miss a quicker-cycling site."""
+        deltas = []
+        for overlay in overlays:
+            new_dt = _parse_volume_datetime(overlay.volume_time)
+            if new_dt is None:
+                continue
+            prev_dt = self.last_volume_dt.get(overlay.station)
+            if prev_dt is not None and new_dt > prev_dt:
+                deltas.append((new_dt - prev_dt).total_seconds())
+            self.last_volume_dt[overlay.station] = new_dt
+
+        if deltas:
+            measured = min(deltas) + REFRESH_BUFFER_SEC
+            new_interval = int(max(MIN_REFRESH_INTERVAL_SEC, min(MAX_REFRESH_INTERVAL_SEC, measured)))
+            if new_interval != self.auto_refresh_interval_sec:
+                self.auto_refresh_interval_sec = new_interval
+                if self.auto_timer.isActive():
+                    self.auto_timer.start(self.auto_refresh_interval_sec * 1000)
+
     def on_overlays_ready(self, overlays: list):
+        self._update_measured_refresh_interval(overlays)
+
         was_at_live = (self.history_index == -1) or (self.history_index == len(self.history) - 1)
 
         self.history.append(overlays)
