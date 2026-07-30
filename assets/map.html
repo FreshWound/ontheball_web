@@ -195,7 +195,7 @@
       light: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json'
     };
 
-    const HOME_COORDS = [-85.3255, 41.9589];
+    let homeMarker = null; // set once the user enters a home location; not fixed/hardcoded
 
     let currentOpacity = 0.3;
     let currentLayersCount = 0;
@@ -231,6 +231,19 @@
     }
 
     map.on('style.load', prioritizePlaceLabels);
+
+    // Report cursor position to Python for the distance-from-home status bar
+    // readout. Throttled to ~20/sec — mousemove fires far more often than
+    // that, and there's no need to round-trip through the bridge every time.
+    let lastCursorReportMs = 0;
+    map.on('mousemove', (e) => {
+      const now = performance.now();
+      if (now - lastCursorReportMs < 50) return;
+      lastCursorReportMs = now;
+      if (window.bridge && window.bridge.reportCursorPosition) {
+        window.bridge.reportCursorPosition(e.lngLat.lat, e.lngLat.lng);
+      }
+    });
 
     // Dynamic Default Gradients & Detailed Labels for Py-ART Products
     function renderFallbackLegend(product, title) {
@@ -323,32 +336,50 @@
         mapMarkers = [];
       }
 
-      function addHomeMarker() {
+      function updateHomeMarker(lat, lon) {
+        if (homeMarker) {
+          homeMarker.remove();
+          homeMarker = null;
+        }
         const homeEl = document.createElement('div');
         homeEl.className = 'home-marker';
         homeEl.innerHTML = '⌂';
-        homeEl.title = 'HOME — Dual Radar (KGRR + KIWX)';
+        homeEl.title = `Home (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
 
-        homeEl.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (window.bridge) {
-            window.bridge.selectStation('HOME');
-          }
-        });
-
-        const m = new maplibregl.Marker({ element: homeEl })
-          .setLngLat(HOME_COORDS)
+        homeMarker = new maplibregl.Marker({ element: homeEl })
+          .setLngLat([lon, lat])
           .addTo(map);
-        
-        mapMarkers.push(m);
       }
 
-      addHomeMarker();
+      if (bridge.homeMarkerReady) {
+        bridge.homeMarkerReady.connect(function(jsonStr) {
+          const pos = JSON.parse(jsonStr);
+          updateHomeMarker(pos.lat, pos.lon);
+        });
+      }
+
+      // Click-to-set-home: Python arms/disarms this via armHomeSelection;
+      // while armed, the next map click (that isn't on a marker, which
+      // stops propagation itself) reports its lat/lon back as the new home.
+      let homeSelectionArmed = false;
+      if (bridge.armHomeSelection) {
+        bridge.armHomeSelection.connect(function(armed) {
+          homeSelectionArmed = armed;
+          map.getCanvas().style.cursor = armed ? 'crosshair' : '';
+        });
+      }
+      map.on('click', (e) => {
+        if (!homeSelectionArmed) return;
+        homeSelectionArmed = false;
+        map.getCanvas().style.cursor = '';
+        if (window.bridge && window.bridge.reportHomeLocationClick) {
+          window.bridge.reportHomeLocationClick(e.lngLat.lat, e.lngLat.lng);
+        }
+      });
 
       if (bridge.stationsReady) {
         bridge.stationsReady.connect(function(jsonStr) {
           clearMarkers();
-          addHomeMarker();
 
           const stations = JSON.parse(jsonStr);
           stations.forEach(st => {

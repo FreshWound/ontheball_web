@@ -16,9 +16,9 @@ import threading
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QDoubleValidator
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QHBoxLayout, QLabel,
+    QApplication, QComboBox, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QSlider, QStatusBar, QVBoxLayout, QWidget,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -27,7 +27,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.7.5"
+__version__ = "0.7.7"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -36,8 +36,7 @@ HTTP_PORT = 8765
 AUTO_REFRESH_OPTIONS = {"Off": 0, "1 min": 60, "2 min": 120, "5 min": 300, "10 min": 600}
 MAX_HISTORY = 12          # cap on cached in-session frames
 PLAYBACK_FRAME_MS = 600   # time each frame stays on screen during playback
-
-HOME_STATIONS = ["KGRR", "KIWX"]
+HOME_STATION_COUNT = 3    # how many closest stations to load when Home Location is set
 
 
 def start_local_server(directory: Path, port: int):
@@ -95,6 +94,10 @@ class Bridge(QObject):
     opacityChanged = pyqtSignal(int)             # 0-100
     legendReady = pyqtSignal(str)                # JSON legend spec for current product
     warningsReady = pyqtSignal(str)              # JSON GeoJSON FeatureCollection
+    cursorMoved = pyqtSignal(float, float)       # (lat, lon) under the mouse, for the distance-from-home readout
+    homeMarkerReady = pyqtSignal(str)            # JSON {lat, lon} once a home location is set
+    armHomeSelection = pyqtSignal(bool)          # True = enter "click the map to set home" mode, False = cancel
+    homeLocationClicked = pyqtSignal(float, float)  # fired when the map is clicked while armed
 
     @pyqtSlot()
     def jsReady(self):
@@ -103,6 +106,14 @@ class Bridge(QObject):
     @pyqtSlot(str)
     def selectStation(self, code: str):
         self.stationSelected.emit(str(code))
+
+    @pyqtSlot(float, float)
+    def reportCursorPosition(self, lat: float, lon: float):
+        self.cursorMoved.emit(lat, lon)
+
+    @pyqtSlot(float, float)
+    def reportHomeLocationClick(self, lat: float, lon: float):
+        self.homeLocationClicked.emit(lat, lon)
 
 
 class MainWindow(QMainWindow):
@@ -117,6 +128,13 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.warnings_worker = None
 
+        # Home location: entered fresh each session, never persisted to disk.
+        # When set, self.home_active_stations overrides whatever's picked in
+        # the Station dropdown until the user manually selects a station again.
+        self.home_lat: float | None = None
+        self.home_lon: float | None = None
+        self.home_active_stations: list | None = None
+
         self.history: list = []
         self.history_index: int = -1
 
@@ -130,9 +148,6 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Station:"))
         self.station_combo = QComboBox()
-
-        # Add HOME Dual Radar Option
-        self.station_combo.addItem("HOME (Dual Radar: KGRR + KIWX)", userData="HOME")
 
         for code, meta in radar_source.STATIONS.items():
             self.station_combo.addItem(f"{code} — {meta['name']}", userData=code)
@@ -179,6 +194,33 @@ class MainWindow(QMainWindow):
         controls.addStretch(1)
         layout.addLayout(controls)
 
+        home_controls = QHBoxLayout()
+        home_controls.addWidget(QLabel("Home Location (lat, lon):"))
+
+        coord_validator = QDoubleValidator(-180.0, 180.0, 6)
+        coord_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+
+        self.home_lat_input = QLineEdit()
+        self.home_lat_input.setPlaceholderText("e.g. 41.9525")
+        self.home_lat_input.setValidator(coord_validator)
+        self.home_lat_input.setFixedWidth(90)
+        home_controls.addWidget(self.home_lat_input)
+
+        self.home_lon_input = QLineEdit()
+        self.home_lon_input.setPlaceholderText("e.g. -85.3163")
+        self.home_lon_input.setValidator(coord_validator)
+        self.home_lon_input.setFixedWidth(90)
+        home_controls.addWidget(self.home_lon_input)
+
+        self.set_home_btn = QPushButton("Set Home")
+        self.set_home_btn.clicked.connect(self.on_set_home_clicked)
+        home_controls.addWidget(self.set_home_btn)
+
+        self.home_status_label = QLabel("Home not set — type lat/lon, or leave both blank and click Set Home to pick a spot on the map")
+        home_controls.addWidget(self.home_status_label)
+        home_controls.addStretch(1)
+        layout.addLayout(home_controls)
+
         history_controls = QHBoxLayout()
         self.play_btn = QPushButton("▶ Play")
         self.play_btn.setEnabled(False)
@@ -212,11 +254,18 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status)
         self.status.showMessage("loading map…")
 
+        self.distance_label = QLabel("")
+        self.status.addPermanentWidget(self.distance_label)
+
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self.refresh_now)
 
         self.bridge.readyFromJs.connect(self.on_js_ready)
         self.bridge.stationSelected.connect(self.on_station_selected_from_map)
+        self.bridge.cursorMoved.connect(self.on_cursor_moved)
+        self.bridge.homeLocationClicked.connect(self.on_home_location_clicked)
+
+        self._home_selection_armed = False
 
     def on_js_ready(self):
         stations_payload = [
@@ -232,6 +281,7 @@ class MainWindow(QMainWindow):
         idx = self.station_combo.findData(code)
         if idx >= 0:
             if idx == self.station_combo.currentIndex():
+                self.home_active_stations = None
                 self.reset_history()
                 self.refresh_now()
             else:
@@ -251,8 +301,69 @@ class MainWindow(QMainWindow):
             self.auto_timer.stop()
 
     def on_station_changed(self, _index: int):
+        self.home_active_stations = None
         self.reset_history()
         self.refresh_now()
+
+    def on_set_home_clicked(self):
+        lat_text = self.home_lat_input.text().strip()
+        lon_text = self.home_lon_input.text().strip()
+
+        if not lat_text and not lon_text:
+            # Both fields empty: toggle "click the map to set home" mode
+            # instead of treating this as a validation error.
+            if self._home_selection_armed:
+                self._disarm_home_selection()
+            else:
+                self._arm_home_selection()
+            return
+
+        try:
+            lat = float(lat_text)
+            lon = float(lon_text)
+            if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+                raise ValueError("out of range")
+        except ValueError:
+            self.home_status_label.setText("Enter valid lat/lon, e.g. 41.9525, -85.3163 — or clear both fields and click Set Home to pick a spot on the map")
+            return
+
+        self._disarm_home_selection()
+        self._apply_home_location(lat, lon)
+
+    def _arm_home_selection(self):
+        self._home_selection_armed = True
+        self.set_home_btn.setText("Click the map…")
+        self.home_status_label.setText("Click anywhere on the map to set that as home (or click Set Home again to cancel)")
+        self.bridge.armHomeSelection.emit(True)
+
+    def _disarm_home_selection(self):
+        self._home_selection_armed = False
+        self.set_home_btn.setText("Set Home")
+        self.bridge.armHomeSelection.emit(False)
+
+    def on_home_location_clicked(self, lat: float, lon: float):
+        if not self._home_selection_armed:
+            return
+        self._disarm_home_selection()
+        self.home_lat_input.setText(f"{lat:.4f}")
+        self.home_lon_input.setText(f"{lon:.4f}")
+        self._apply_home_location(lat, lon)
+
+    def _apply_home_location(self, lat: float, lon: float):
+        self.home_lat = lat
+        self.home_lon = lon
+        self.home_active_stations = radar_source.find_closest_stations(lat, lon, n=HOME_STATION_COUNT)
+        self.home_status_label.setText(f"Home set — showing {', '.join(self.home_active_stations)}")
+        self.bridge.homeMarkerReady.emit(json.dumps({"lat": lat, "lon": lon}))
+        self.reset_history()
+        self.refresh_now()
+
+    def on_cursor_moved(self, lat: float, lon: float):
+        if self.home_lat is None or self.home_lon is None:
+            return
+        dist_km = radar_source._haversine_km(self.home_lat, self.home_lon, lat, lon)
+        dist_mi = dist_km * 0.621371
+        self.distance_label.setText(f"{dist_mi:.1f} mi from home")
 
     def reset_history(self):
         self.play_timer.stop()
@@ -279,7 +390,7 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             return
         selected_code = self.current_station()
-        stations = HOME_STATIONS if selected_code == "HOME" else [selected_code]
+        stations = self.home_active_stations if self.home_active_stations else [selected_code]
 
         self.status.showMessage(f"fetching {' + '.join(stations)}…")
         self.refresh_btn.setEnabled(False)

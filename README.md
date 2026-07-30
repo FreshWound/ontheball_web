@@ -1,10 +1,111 @@
-# ontheball — web basemap prototype (v0.7.5)
+# ontheball — web basemap prototype (v0.7.7)
 
-**Versioning note**: deliverables are named with a version number
-(`ontheball_web_v0.7.5.zip`, folder `otb_web_v0.7.5/`) so a broken WIP
-build never overwrites a working one. Unzip each version to its own
-folder rather than replacing an existing one in place — that way you can
-always fall back to the last version that worked.
+## Install (one-time)
+
+Using a virtual environment keeps these dependencies isolated from your
+system Python — recommended so installs stay clean across versions:
+
+```bash
+cd ontheball_web          # your cloned repo folder
+
+# One-time per machine: make sure the venv module is available
+sudo apt-get install -y python3-venv
+
+# Create and activate a virtual environment (per project folder)
+python3 -m venv .venv
+source .venv/bin/activate
+# your prompt should now show (.venv) at the front
+
+# Install everything the app needs — inside a venv, no --break-system-packages needed
+pip install --upgrade pip
+pip install PyQt6 PyQt6-WebEngine arm_pyart boto3 numpy matplotlib cmweather scipy
+```
+
+If PyQt6 complains about a missing xcb-cursor plugin on a fresh system,
+that's a system package, not a Python one — install it outside the venv:
+
+```bash
+sudo apt-get install -y libxcb-cursor0
+```
+
+The `assets/` folder already contains a local copy of MapLibre GL JS
+(`maplibre-gl.mjs`, `-shared.mjs`, `-worker.mjs`, `.css`) pulled via npm,
+so there's no npm/node dependency at runtime — only pip.
+
+When you're done testing: `deactivate`. Next time, just
+`source .venv/bin/activate` again in that same folder — no reinstall
+needed unless you're on a new version/folder.
+
+## Run
+
+```bash
+cd ontheball_web
+source .venv/bin/activate   # if not already active
+python3 ontheball_web.py
+```
+
+A window opens with a station picker, "Refresh now", and an auto-refresh
+interval dropdown. It fetches the latest volume for the selected station
+from `s3://unidata-nexrad-level2` (free, anonymous), decodes + clutter-filters
+it with Py-ART exactly like before, grids it, and renders it onto the map
+as a semi-transparent overlay. The basemap itself is loaded live from
+OpenFreeMap (`tiles.openfreemap.org`) — needs your normal internet access,
+no API key.
+
+<!--
+MAINTENANCE NOTE: Install (one-time) and Run stay as the first two
+sections of this file, immediately after the title — always add new
+content below them, never above. Keep this comment when editing.
+-->
+
+**Versioning note**: this project now lives in git
+(github.com/FreshWound/ontheball_web) — the old zip-per-version workflow
+is superseded by real commit history. `git log` shows every past state,
+and `git checkout <commit>` (or a tag, once any are cut) gets you back
+to a specific one if a change ever needs rolling back. The `__version__`
+string in `ontheball_web.py` and the version in this title still get
+bumped each notable change, just as a quick human-readable marker
+alongside the commit history — not as the primary safety net anymore.
+
+## What's new in v0.7.7 — station-click regression fixed + click-to-set-home
+
+**Bug fixed**: v0.7.6 broke clickable radar stations entirely. Cause: the
+old `addHomeMarker()` function got renamed to `updateHomeMarker(lat, lon)`,
+but a leftover call to the old name (`addHomeMarker();`, no arguments)
+was still sitting inside the `stationsReady` handler — right before the
+loop that actually creates the station markers. That call threw a
+`ReferenceError` every time the station list loaded, which aborted the
+rest of the handler before it ever reached the marker-creation loop, so
+no station markers got created at all. Removed the stale call.
+
+**Click-to-set-home**: clicking **Set Home** with both lat/lon fields
+left blank now arms a "click the map" mode (cursor becomes a crosshair,
+button label changes) — the next map click sets that as home, fills the
+lat/lon fields in for reference, and loads the closest 3 stations, same
+as manual entry. Click **Set Home** again while armed to cancel. Typing
+exact coordinates into the fields still works exactly as before, if that's
+ever preferred over clicking.
+
+## What's new in v0.7.6 — settable home location + distance readout
+
+- **Removed the fixed HOME (Dual Radar: KGRR + KIWX) preset.** Home
+  location is now entered as lat/lon in the controls each session (not
+  saved to disk — intentional, so it's set fresh every time the app
+  loads). Hitting **Set Home** finds and loads the 3 closest stations
+  automatically (`radar_source.find_closest_stations`), reusing the same
+  multi-station composite rendering the old fixed preset used — nothing
+  changed about how multiple overlays actually render, just how the
+  station list gets picked.
+- Manually selecting a station from the dropdown (or clicking one on the
+  map) properly overrides home mode and goes back to single-station view.
+- **Distance-from-home readout** in the status bar (bottom right),
+  live-updating in miles based on wherever the cursor is over the map.
+  Only appears once a home location has been set.
+- A home marker (⌂) appears on the map once set, at the actual entered
+  coordinates instead of a fixed location.
+- README reorganized: Install and Run are now the first two sections,
+  right after the title — a maintenance note is left in the file itself
+  asking future edits to keep it that way.
 
 ## What's new in v0.7.5 — merging in a lot of independent progress
 
@@ -344,59 +445,6 @@ which we know reaches the terminal from earlier logs).
   frames aren't relevant to a different radar. Product switching re-renders
   whichever frame you're currently viewing (live or scrubbed) without a
   re-fetch, same as before.
-
-
-## Install (one-time)
-
-Using a virtual environment keeps these dependencies isolated from your
-system Python — recommended so installs stay clean across versions:
-
-```bash
-cd otb_web_v0.7.5        # or wherever you unzipped this version
-
-# One-time per machine: make sure the venv module is available
-sudo apt-get install -y python3-venv
-
-# Create and activate a virtual environment (per project folder)
-python3 -m venv .venv
-source .venv/bin/activate
-# your prompt should now show (.venv) at the front
-
-# Install everything the app needs — inside a venv, no --break-system-packages needed
-pip install --upgrade pip
-pip install PyQt6 PyQt6-WebEngine arm_pyart boto3 numpy matplotlib cmweather scipy
-```
-
-If PyQt6 complains about a missing xcb-cursor plugin on a fresh system,
-that's a system package, not a Python one — install it outside the venv:
-
-```bash
-sudo apt-get install -y libxcb-cursor0
-```
-
-The `assets/` folder already contains a local copy of MapLibre GL JS
-(`maplibre-gl.mjs`, `-shared.mjs`, `-worker.mjs`, `.css`) pulled via npm,
-so there's no npm/node dependency at runtime — only pip.
-
-When you're done testing: `deactivate`. Next time, just
-`source .venv/bin/activate` again in that same folder — no reinstall
-needed unless you're on a new version/folder.
-
-## Run
-
-```bash
-cd otb_web_v0.7.5
-source .venv/bin/activate   # if not already active
-python3 ontheball_web.py
-```
-
-A window opens with a station picker, "Refresh now", and an auto-refresh
-interval dropdown. It fetches the latest volume for the selected station
-from `s3://unidata-nexrad-level2` (free, anonymous), decodes + clutter-filters
-it with Py-ART exactly like before, grids it, and renders it onto the map
-as a semi-transparent overlay. The basemap itself is loaded live from
-OpenFreeMap (`tiles.openfreemap.org`) — needs your normal internet access,
-no API key.
 
 ## What's new in this version
 
