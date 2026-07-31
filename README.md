@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.8.1)
+# ontheball — web basemap prototype (v0.8.2)
 
 ![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 
@@ -84,6 +84,15 @@ to a specific one if a change ever needs rolling back. The `__version__`
 string in `ontheball_web.py` and the version in this title still get
 bumped each notable change, just as a quick human-readable marker
 alongside the commit history — not as the primary safety net anymore.
+
+## What's new in v0.8.2 — instant switch to already-loaded stations
+
+- Clicking a station marker that's already rendered on screen (e.g. one of
+  the up-to-3 Home-mode stations) now reuses that already-downloaded,
+  already-gridded overlay instead of firing a brand-new S3 fetch. Previously
+  every station click — even one you could already see — dropped out of
+  Home mode and re-ran the whole download-and-grid pipeline from scratch.
+  Clicking a station that *isn't* already loaded still fetches normally.
 
 ## What's new in v0.8.1 — merged grid passes to cut station-click delay
 

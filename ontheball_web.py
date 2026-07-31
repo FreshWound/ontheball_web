@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -334,13 +334,44 @@ class MainWindow(QMainWindow):
 
     def on_station_selected_from_map(self, code: str):
         idx = self.station_combo.findData(code)
-        if idx >= 0:
-            if idx == self.station_combo.currentIndex():
-                self.home_active_stations = None
-                self.reset_history()
-                self.refresh_now()
-            else:
-                self.station_combo.setCurrentIndex(idx)
+        if idx < 0:
+            return
+
+        # If this station is already rendered in the current frame (e.g. one
+        # of the up-to-3 Home-mode stations already on screen), reuse that
+        # overlay instead of firing a brand-new fetch — it's already been
+        # downloaded and gridded, so this is instant instead of repeating
+        # the whole S3-download-plus-Py-ART pipeline for data we already have.
+        cached_overlay = None
+        if self.history:
+            current_idx = max(0, min(self.history_index, len(self.history) - 1))
+            for ov in self.history[current_idx]:
+                if ov.station == code:
+                    cached_overlay = ov
+                    break
+
+        self.home_active_stations = None
+        self.station_combo.blockSignals(True)
+        self.station_combo.setCurrentIndex(idx)
+        self.station_combo.blockSignals(False)
+
+        if cached_overlay is not None:
+            self.play_timer.stop()
+            self.play_btn.setText("▶ Play")
+            self.play_btn.setEnabled(False)
+            self.history = [[cached_overlay]]
+            self.history_index = 0
+            self.history_slider.blockSignals(True)
+            self.history_slider.setRange(0, 0)
+            self.history_slider.setEnabled(False)
+            self.history_slider.blockSignals(False)
+            self._display_current_frame()
+            self.status.showMessage(
+                f"{code} — showing already-loaded data (click Refresh now for the newest volume)", 5000
+            )
+        else:
+            self.reset_history()
+            self.refresh_now()
 
     def current_station(self) -> str:
         return self.station_combo.currentData()
