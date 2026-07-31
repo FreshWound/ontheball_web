@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.8.3)
+# ontheball — web basemap prototype (v0.8.4)
 
 ![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 
@@ -84,6 +84,21 @@ to a specific one if a change ever needs rolling back. The `__version__`
 string in `ontheball_web.py` and the version in this title still get
 bumped each notable change, just as a quick human-readable marker
 alongside the commit history — not as the primary safety net anymore.
+
+## What's new in v0.8.4 — reuse S3 client; timing confirms grid step dominates
+
+- Real timing data from v0.8.3 showed `grid+render` — not the S3 download —
+  is the larger and more variable cost per station load (5s for a quiet
+  KIWX scan, up to 12s for a KLOT volume with a domain-filling storm).
+  Py-ART's Barnes interpolation cost scales with how much actual weather is
+  in the scan, which is expected/proportional, not a bug. It's also
+  single-threaded, so it can sit there for several seconds while "total"
+  CPU usage looks low on a many-core machine — one fully-pegged core just
+  doesn't move the total-CPU needle much on a 12-thread CPU.
+- Real fixable overhead the timing did expose: `_s3_client()` was
+  constructing a brand-new boto3 client (fresh TCP/TLS handshake) twice per
+  station load — once for the key listing, once for the download. Now
+  cached at module level and reused across calls/stations.
 
 ## What's new in v0.8.3 — per-stage load timing (diagnostic only)
 

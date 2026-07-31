@@ -386,8 +386,18 @@ def sample_value(overlay: "RadarOverlay", product_key: str, lat: float, lon: flo
     return float(val)
 
 
+_S3_CLIENT = None
+
+
 def _s3_client():
-    return boto3.client("s3", config=Config(signature_version=UNSIGNED))
+    # Reused across calls (and across stations) so we're not paying a fresh
+    # TCP/TLS handshake + connection-pool setup twice per station load
+    # (once for the key listing, once for the download) — that overhead
+    # showed up clearly once we added timing instrumentation.
+    global _S3_CLIENT
+    if _S3_CLIENT is None:
+        _S3_CLIENT = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+    return _S3_CLIENT
 
 
 def _latest_key(station: str):
