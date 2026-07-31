@@ -256,6 +256,18 @@ CORR_COEFF_ANCHORS = [
     (1.02, "#F5F5F5"),
 ]
 
+ZDR_MIN = -2.0         # dB, floor of the display range (light rain/drizzle can dip slightly negative)
+ZDR_MAX = 6.0          # dB, ceiling — values above this usually mean large drops/hail and clip to the top color
+
+ZDR_ANCHORS = [
+    (ZDR_MIN, "#3F1E5A"),   # negative - purple (small/irregular scatterers, e.g. dry snow)
+    (0.0, "#3FA0E0"),       # near zero - blue (light rain, small uniform drops)
+    (1.0, "#3FCF3F"),       # green - moderate rain
+    (2.0, "#F5E642"),       # yellow - heavier rain, larger drops
+    (3.5, "#F5A623"),       # orange - big drops
+    (ZDR_MAX, "#E0342A"),   # red - very large drops / possible hail
+]
+
 
 def _make_cmap(anchors, vmin: float, vmax: float):
     """Build a smooth colormap from (value, hex_color) anchor points."""
@@ -276,6 +288,10 @@ def _corr_coeff_cmap():
     return _make_cmap(CORR_COEFF_ANCHORS, CORR_COEFF_MIN, 1.02)
 
 
+def _zdr_cmap():
+    return _make_cmap(ZDR_ANCHORS, ZDR_MIN, ZDR_MAX)
+
+
 PRODUCTS = {
     "reflectivity": dict(
         field="reflectivity", label="Reflectivity", unit="dBZ", scale=1.0,
@@ -294,6 +310,12 @@ PRODUCTS = {
         vmin=CORR_COEFF_MIN, vmax=1.02,
         cmap=_corr_coeff_cmap, transparent_below=None,
         legend_anchors=CORR_COEFF_ANCHORS,
+    ),
+    "differential_reflectivity": dict(
+        field="differential_reflectivity", label="Differential Reflectivity (ZDR)", unit="dB", scale=1.0,
+        vmin=ZDR_MIN, vmax=ZDR_MAX,
+        cmap=_zdr_cmap, transparent_below=None,
+        legend_anchors=ZDR_ANCHORS,
     ),
 }
 
@@ -317,6 +339,50 @@ class RadarOverlay:
     station: str
     volume_time: str
     source: str                # "live" or "synthetic-demo"
+    grid_fields: dict = None   # product_key -> raw masked ndarray (already in display units), for hover lookups
+    origin_lat: float = None   # radar site lat, used to re-project cursor lat/lon back to a grid pixel
+    origin_lon: float = None
+
+
+def sample_value(overlay: "RadarOverlay", product_key: str, lat: float, lon: float):
+    """Look up the raw field value at a given lat/lon within this overlay's grid.
+
+    Used to drive the legend hover-highlight: as the cursor moves over the map,
+    the caller re-projects (lat, lon) back onto the same aeqd grid the radar
+    was rendered on and reads the real value at that pixel — no separate
+    lookup table, just the same data already used for the PNG.
+
+    Returns None if the product wasn't rendered for this overlay, the point
+    falls outside the grid extent, or that pixel has no valid return
+    (masked/clear-air).
+    """
+    if not overlay.grid_fields or product_key not in overlay.grid_fields:
+        return None
+    if overlay.origin_lat is None or overlay.origin_lon is None:
+        return None
+
+    data = overlay.grid_fields[product_key]
+    n = data.shape[0]  # square grid, GRID_CELLS x GRID_CELLS
+
+    transformer = Transformer.from_crs(
+        "EPSG:4326",
+        {"proj": "aeqd", "lat_0": overlay.origin_lat, "lon_0": overlay.origin_lon, "datum": "WGS84"},
+        always_xy=True,
+    )
+    x, y = transformer.transform(lon, lat)
+    if abs(x) > GRID_RANGE_M or abs(y) > GRID_RANGE_M:
+        return None
+
+    # row 0 = south (matches the origin='lower' PNG export convention used elsewhere)
+    col = int(round((x + GRID_RANGE_M) / (2 * GRID_RANGE_M) * (n - 1)))
+    row = int(round((y + GRID_RANGE_M) / (2 * GRID_RANGE_M) * (n - 1)))
+    col = max(0, min(n - 1, col))
+    row = max(0, min(n - 1, row))
+
+    val = data[row, col]
+    if np.ma.is_masked(val):
+        return None
+    return float(val)
 
 
 def _s3_client():
@@ -395,6 +461,10 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
     if "cross_correlation_ratio" in radar.fields:
         cc_gf.exclude_below("cross_correlation_ratio", CORR_COEFF_MIN)
 
+    # 4. Dedicated Differential Reflectivity (ZDR) GateFilter
+    zdr_gf = pyart.filters.GateFilter(radar)
+    zdr_gf.exclude_below("reflectivity", REFLECTIVITY_FLOOR)
+
     # Dealias Base Velocity if present
     if "velocity" in radar.fields:
         try:
@@ -412,6 +482,7 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
     products = {}
     available = []
     notes = {}
+    grid_fields = {}   # product_key -> raw masked ndarray (post-scale), for cursor hover lookups
 
     # --- Pass A: Reflectivity ---
     refl_grid = pyart.map.grid_from_radars(
@@ -426,6 +497,7 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
         refl_data, cfg_refl["vmin"], cfg_refl["vmax"], cfg_refl["cmap"](), cfg_refl["transparent_below"]
     )
     available.append("reflectivity")
+    grid_fields["reflectivity"] = refl_data
 
     # --- Pass B: Base Velocity ---
     if "velocity" in radar.fields:
@@ -447,6 +519,7 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
                 vel_data, cfg_vel["vmin"], cfg_vel["vmax"], cfg_vel["cmap"](), cfg_vel["transparent_below"]
             )
             available.append("velocity")
+            grid_fields["velocity"] = vel_data
         else:
             notes["velocity"] = "Velocity data masked out across entire grid."
     else:
@@ -469,13 +542,37 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
                 cc_data, cfg_cc["vmin"], cfg_cc["vmax"], cfg_cc["cmap"](), cfg_cc["transparent_below"]
             )
             available.append("correlation_coefficient")
+            grid_fields["correlation_coefficient"] = cc_data
         else:
             notes["correlation_coefficient"] = "no gates passed quality filtering this scan"
     else:
         notes["correlation_coefficient"] = "not present in this volume"
 
+    # --- Pass D: Differential Reflectivity (ZDR) ---
+    if "differential_reflectivity" in radar.fields:
+        zdr_grid = pyart.map.grid_from_radars(
+            (radar,), gatefilters=(zdr_gf,),
+            grid_shape=(1, GRID_CELLS, GRID_CELLS),
+            grid_limits=((0, 1000), (-GRID_RANGE_M, GRID_RANGE_M), (-GRID_RANGE_M, GRID_RANGE_M)),
+            fields=["differential_reflectivity"],
+        )
+        cfg_zdr = PRODUCTS["differential_reflectivity"]
+        zdr_data = zdr_grid.fields["differential_reflectivity"]["data"][0]
+        zdr_mask = np.ma.getmaskarray(zdr_data) if np.ma.is_masked(zdr_data) else np.zeros(zdr_data.shape, dtype=bool)
+
+        if not zdr_mask.all():
+            products["differential_reflectivity"] = _field_to_png_base64(
+                zdr_data, cfg_zdr["vmin"], cfg_zdr["vmax"], cfg_zdr["cmap"](), cfg_zdr["transparent_below"]
+            )
+            available.append("differential_reflectivity")
+            grid_fields["differential_reflectivity"] = zdr_data
+        else:
+            notes["differential_reflectivity"] = "no gates passed quality filtering this scan"
+    else:
+        notes["differential_reflectivity"] = "not present in this volume (radar may have been in a legacy/non-dual-pol scan)"
+
     coords = _corners_latlon(origin_lat, origin_lon, GRID_RANGE_M)
-    return products, available, notes, coords
+    return products, available, notes, coords, grid_fields
 
 
 def _synthetic_demo(station: str) -> RadarOverlay:
@@ -497,10 +594,20 @@ def _synthetic_demo(station: str) -> RadarOverlay:
     cc = np.clip(0.92 + refl / 500 + rng.normal(0, 0.02, refl.shape), CORR_COEFF_MIN, 1.02)
     cc_masked = np.ma.array(cc, mask=np.ma.getmaskarray(refl_masked))
 
+    zdr = np.clip((refl - 20) / 15 + rng.normal(0, 0.4, refl.shape), ZDR_MIN, ZDR_MAX)
+    zdr_masked = np.ma.array(zdr, mask=np.ma.getmaskarray(refl_masked))
+
     products = {
         "reflectivity": _field_to_png_base64(refl_masked, REFLECTIVITY_FLOOR, REFLECTIVITY_MAX, _reflectivity_cmap(), REFLECTIVITY_FLOOR),
         "velocity": _field_to_png_base64(vel_masked, -VELOCITY_MAX_MPH, VELOCITY_MAX_MPH, _velocity_cmap(), None),
         "correlation_coefficient": _field_to_png_base64(cc_masked, CORR_COEFF_MIN, 1.02, _corr_coeff_cmap(), None),
+        "differential_reflectivity": _field_to_png_base64(zdr_masked, ZDR_MIN, ZDR_MAX, _zdr_cmap(), None),
+    }
+    grid_fields = {
+        "reflectivity": refl_masked,
+        "velocity": vel_masked,
+        "correlation_coefficient": cc_masked,
+        "differential_reflectivity": zdr_masked,
     }
     coords = _corners_latlon(meta["lat"], meta["lon"], GRID_RANGE_M)
     return RadarOverlay(
@@ -511,6 +618,9 @@ def _synthetic_demo(station: str) -> RadarOverlay:
         station=station,
         volume_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") + " (synthetic demo)",
         source="synthetic-demo",
+        grid_fields=grid_fields,
+        origin_lat=meta["lat"],
+        origin_lon=meta["lon"],
     )
 
 
@@ -530,7 +640,7 @@ def get_latest_overlay(station: str = "KIWX") -> RadarOverlay:
 
         origin_lat = float(radar.latitude["data"][0])
         origin_lon = float(radar.longitude["data"][0])
-        products, available, notes, coords = _grid_and_render(radar, origin_lat, origin_lon)
+        products, available, notes, coords, grid_fields = _grid_and_render(radar, origin_lat, origin_lon)
         volume_time = key.split("/")[-1]
         return RadarOverlay(
             products=products,
@@ -540,6 +650,9 @@ def get_latest_overlay(station: str = "KIWX") -> RadarOverlay:
             station=station,
             volume_time=volume_time,
             source="live",
+            grid_fields=grid_fields,
+            origin_lat=origin_lat,
+            origin_lon=origin_lon,
         )
     except Exception as exc:  # noqa: BLE001
         fallback = _synthetic_demo(station)

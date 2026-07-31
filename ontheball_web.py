@@ -14,6 +14,7 @@ import json
 import re
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.7.8"
+__version__ = "0.8.0"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -79,15 +80,34 @@ class MultiRadarFetchWorker(QThread):
         self.stations = stations
 
     def run(self):
-        overlays = []
+        overlays_by_index = {}
         errors = []
-        for st in self.stations:
-            try:
-                overlay = radar_source.get_latest_overlay(st)
-                overlays.append(overlay)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{st}: {exc.__class__.__name__}: {exc}")
-        
+
+        # S3 downloads and Py-ART gridding are both I/O- and CPU-heavy;
+        # fetching stations one at a time meant N stations took N times as
+        # long as one. A small thread pool lets them overlap instead —
+        # while one station's volume is downloading, another can already be
+        # gridding, and Py-ART's C extensions release the GIL during the
+        # heavy interpolation work so real parallelism is possible here
+        # despite Python's GIL.
+        max_workers = min(len(self.stations), 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_index = {
+                pool.submit(radar_source.get_latest_overlay, st): idx
+                for idx, st in enumerate(self.stations)
+            }
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                st = self.stations[idx]
+                try:
+                    overlays_by_index[idx] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{st}: {exc.__class__.__name__}: {exc}")
+
+        # Reassemble in the original station order (closest-first for Home
+        # mode) regardless of which fetch happened to finish first.
+        overlays = [overlays_by_index[i] for i in range(len(self.stations)) if i in overlays_by_index]
+
         if overlays:
             self.finished_ok.emit(overlays)
         else:
@@ -118,6 +138,7 @@ class Bridge(QObject):
     legendReady = pyqtSignal(str)                # JSON legend spec for current product
     warningsReady = pyqtSignal(str)              # JSON GeoJSON FeatureCollection
     cursorMoved = pyqtSignal(float, float)       # (lat, lon) under the mouse, for the distance-from-home readout
+    hoverValueReady = pyqtSignal(str)            # JSON {value, pct, unit} or {value: null} for the legend hover-highlight
     homeMarkerReady = pyqtSignal(str)            # JSON {lat, lon} once a home location is set
     homeMarkerCleared = pyqtSignal()             # fired when Clear Home is clicked
     armHomeSelection = pyqtSignal(bool)          # True = enter "click the map to set home" mode, False = cancel
@@ -405,11 +426,46 @@ class MainWindow(QMainWindow):
         self.refresh_now()
 
     def on_cursor_moved(self, lat: float, lon: float):
-        if self.home_lat is None or self.home_lon is None:
+        if self.home_lat is not None and self.home_lon is not None:
+            dist_km = radar_source._haversine_km(self.home_lat, self.home_lon, lat, lon)
+            dist_mi = dist_km * 0.621371
+            self.distance_label.setText(f"{dist_mi:.1f} mi from home")
+
+        self._emit_hover_value(lat, lon)
+
+    def _emit_hover_value(self, lat: float, lon: float):
+        """Sample the currently-displayed product's real value under the
+        cursor and send it to JS so the legend can highlight where that
+        value sits on the color scale — the on-map equivalent of GR2Analyst's
+        cursor readout. Tries each station currently on screen (there can be
+        up to 3 in Home mode) and uses whichever one's grid actually covers
+        that point."""
+        if not self.history:
+            self.bridge.hoverValueReady.emit(json.dumps({"value": None}))
             return
-        dist_km = radar_source._haversine_km(self.home_lat, self.home_lon, lat, lon)
-        dist_mi = dist_km * 0.621371
-        self.distance_label.setText(f"{dist_mi:.1f} mi from home")
+
+        idx = max(0, min(self.history_index, len(self.history) - 1))
+        overlays = self.history[idx]
+        product = self.current_product()
+        cfg = radar_source.PRODUCTS[product]
+
+        value = None
+        for overlay in overlays:
+            value = radar_source.sample_value(overlay, product, lat, lon)
+            if value is not None:
+                break
+
+        if value is None:
+            self.bridge.hoverValueReady.emit(json.dumps({"value": None}))
+            return
+
+        vmin, vmax = cfg["vmin"], cfg["vmax"]
+        pct = max(0.0, min(100.0, (value - vmin) / (vmax - vmin) * 100.0))
+        self.bridge.hoverValueReady.emit(json.dumps({
+            "value": round(value, 2),
+            "pct": round(pct, 2),
+            "unit": cfg["unit"],
+        }))
 
     def reset_history(self):
         self.play_timer.stop()

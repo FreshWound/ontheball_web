@@ -102,6 +102,34 @@
       color: #a0b0c0;
       font-weight: 500;
     }
+    #legend-bar-wrap {
+      position: relative;
+    }
+    #legend-hover-tick {
+      position: absolute;
+      top: -3px;
+      width: 2px;
+      height: 18px;
+      background: #ffffff;
+      box-shadow: 0 0 3px rgba(0,0,0,0.9);
+      transform: translateX(-1px);
+      display: none;
+      pointer-events: none;
+    }
+    #legend-hover-value {
+      position: absolute;
+      top: -22px;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.85);
+      color: #ffffff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 5px;
+      border-radius: 3px;
+      white-space: nowrap;
+      display: none;
+      pointer-events: none;
+    }
 
     /* Map Markers */
     .radar-marker {
@@ -185,7 +213,11 @@
   <!-- Dynamic Legend Container -->
   <div id="legend-container">
     <div id="legend-title" style="font-weight: bold; font-size: 12px;">Reflectivity</div>
-    <div id="legend-bar" class="legend-bar"></div>
+    <div id="legend-bar-wrap">
+      <div id="legend-bar" class="legend-bar"></div>
+      <div id="legend-hover-tick"></div>
+      <div id="legend-hover-value"></div>
+    </div>
     <div id="legend-labels" class="legend-labels"></div>
   </div>
 
@@ -264,6 +296,10 @@
         titleEl.innerText = title || 'Correlation Coeff (ρHV)';
         gradient = 'linear-gradient(to right, #444444 0%, #0000ff 30%, #00ff00 60%, #ffff00 85%, #ff0000 100%)';
         labels = ['0.40 (Debris)', '0.65', '0.85', '0.95', '1.00 (Rain/Snow)'];
+      } else if (prodKey === 'ZDR' || prodKey.includes('DIFFERENTIAL')) {
+        titleEl.innerText = title || 'Differential Reflectivity (ZDR)';
+        gradient = 'linear-gradient(to right, #3F1E5A 0%, #3FA0E0 25%, #3FCF3F 37.5%, #F5E642 50%, #F5A623 68.75%, #E0342A 100%)';
+        labels = ['-2 dB', '0 dB', '1 dB', '2 dB', '6 dB (Hail?)'];
       } else {
         // Default: Reflectivity / BR
         titleEl.innerText = title || 'Reflectivity (dBZ)';
@@ -468,6 +504,38 @@
           const title = leg.title || leg.label || 'Radar Scale';
 
           renderFallbackLegend(product, title);
+        });
+      }
+
+      // Legend hover-highlight: as the cursor moves over the map, Python
+      // samples the real gridded value at that point for whichever product
+      // is currently selected and sends back {value, pct, unit}. pct is
+      // already 0-100 along the current product's vmin-vmax range, so it
+      // maps directly onto the legend bar's width.
+      if (bridge.hoverValueReady) {
+        bridge.hoverValueReady.connect(function(jsonStr) {
+          const tick = document.getElementById('legend-hover-tick');
+          const valueLabel = document.getElementById('legend-hover-value');
+          let info = {};
+          try {
+            info = JSON.parse(jsonStr);
+          } catch (e) {
+            info = {};
+          }
+
+          if (info.value === null || info.value === undefined) {
+            tick.style.display = 'none';
+            valueLabel.style.display = 'none';
+            return;
+          }
+
+          const pct = Math.max(0, Math.min(100, info.pct));
+          tick.style.left = pct + '%';
+          tick.style.display = 'block';
+
+          valueLabel.style.left = pct + '%';
+          valueLabel.innerText = info.unit ? `${info.value} ${info.unit}` : `${info.value}`;
+          valueLabel.style.display = 'block';
         });
       }
 

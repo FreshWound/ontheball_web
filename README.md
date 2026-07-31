@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.7.8)
+# ontheball — web basemap prototype (v0.8.0)
 
 ## Install (one-time)
 
@@ -66,6 +66,26 @@ to a specific one if a change ever needs rolling back. The `__version__`
 string in `ontheball_web.py` and the version in this title still get
 bumped each notable change, just as a quick human-readable marker
 alongside the commit history — not as the primary safety net anymore.
+
+## What's new in v0.8.0 — ZDR product, legend hover-highlight, parallel Home fetch
+
+- **Differential Reflectivity (ZDR) added** as a fourth product alongside
+  Reflectivity, Base Velocity, and Correlation Coefficient — same
+  dedicated-gatefilter treatment as the others (its own floor filter, no
+  shared-filter cross-contamination), shows up automatically in the
+  Product dropdown, and falls back gracefully with a note if a volume
+  was scanned pre-dual-pol or nothing passed quality filtering.
+- **Legend hover-highlight**: moving the cursor over the map now samples
+  the real gridded value at that point (re-projected back onto the same
+  grid the radar was rendered on, not a color-matching guess) and shows
+  a tick + value readout sliding along the legend gradient for whichever
+  product is currently selected — the on-map equivalent of GR2Analyst's
+  cursor readout.
+- **Home-mode fetches now run in parallel.** `MultiRadarFetchWorker`
+  previously fetched/gridded each of the 3 Home stations one after another;
+  it now uses a small `ThreadPoolExecutor` so S3 downloads and Py-ART
+  gridding for multiple stations overlap instead of serializing, while
+  preserving closest-first station order in the result.
 
 ## What's new in v0.7.8 — Clear Home + cadence-based auto-refresh
 
