@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.8.4)
+# ontheball — web basemap prototype (v0.9.0)
 
 ![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 
@@ -84,6 +84,16 @@ to a specific one if a change ever needs rolling back. The `__version__`
 string in `ontheball_web.py` and the version in this title still get
 bumped each notable change, just as a quick human-readable marker
 alongside the commit history — not as the primary safety net anymore.
+
+## What's new in v0.9.0 — shift-click multi-station select
+
+- Shift-click a station marker to toggle it in/out of a manual multi-station
+  selection (markers highlight green while selected) — overrides Home mode
+  and the dropdown while active. Only newly-added stations actually fetch
+  from S3; anything already cached in the current frame is reused instantly,
+  same principle as the v0.8.2 already-loaded-station fix. A plain click on
+  any marker, picking from the Station dropdown, or setting Home all cleanly
+  clear the selection and drop back to single/Home-mode behavior.
 
 ## What's new in v0.8.4 — reuse S3 client; timing confirms grid step dominates
 

@@ -147,6 +147,14 @@
       transform: scale(1.3);
       background: #ff4d5a;
     }
+    .radar-marker-selected {
+      background: #2ecc71;
+      border: 2px solid #ffffff;
+      box-shadow: 0 0 10px rgba(46, 204, 113, 0.9);
+    }
+    .radar-marker-selected:hover {
+      background: #4ee08a;
+    }
 
     .home-marker {
       width: 22px;
@@ -232,6 +240,7 @@
     let currentOpacity = 0.3;
     let currentLayersCount = 0;
     let mapMarkers = [];
+    let markerElementsByCode = {};
     let warningsVisible = true;
     // setStyle() wipes every custom source/layer (radar overlay, NWS warnings)
     // but NOT maplibregl.Marker-based station pins (those are plain DOM
@@ -370,6 +379,7 @@
       function clearMarkers() {
         mapMarkers.forEach(m => m.remove());
         mapMarkers = [];
+        markerElementsByCode = {};
       }
 
       function updateHomeMarker(lat, lon) {
@@ -430,20 +440,46 @@
           stations.forEach(st => {
             const el = document.createElement('div');
             el.className = 'radar-marker';
-            el.title = `${st.code} — ${st.name}`;
+            el.title = `${st.code} — ${st.name} (shift-click to add/remove from selection)`;
 
             el.addEventListener('click', (e) => {
               e.stopPropagation();
-              if (window.bridge) {
+              if (!window.bridge) return;
+              if (e.shiftKey) {
+                window.bridge.selectStationShift(st.code);
+              } else {
                 window.bridge.selectStation(st.code);
               }
             });
+
+            markerElementsByCode[st.code] = el;
 
             const m = new maplibregl.Marker({ element: el })
               .setLngLat([st.lon, st.lat])
               .addTo(map);
 
             mapMarkers.push(m);
+          });
+        });
+      }
+
+      // Shift-click multi-select: Python tells us the current full set of
+      // selected station codes any time it changes, and we just resync
+      // every marker's highlight state to match — simpler and less error-
+      // prone than trying to toggle one marker at a time in lockstep.
+      if (bridge.selectedStationsChanged) {
+        bridge.selectedStationsChanged.connect(function(jsonStr) {
+          let selected = [];
+          try {
+            selected = JSON.parse(jsonStr) || [];
+          } catch (e) {
+            selected = [];
+          }
+          const selectedSet = new Set(selected);
+          Object.keys(markerElementsByCode).forEach(code => {
+            const el = markerElementsByCode[code];
+            if (!el) return;
+            el.classList.toggle('radar-marker-selected', selectedSet.has(code));
           });
         });
       }

@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.8.4"
+__version__ = "0.9.0"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -133,6 +133,8 @@ class Bridge(QObject):
     stationsReady = pyqtSignal(str)              # JSON list of station dicts
     readyFromJs = pyqtSignal()                   # fired once JS side connects
     stationSelected = pyqtSignal(str)            # fired when a map marker is clicked
+    stationShiftSelected = pyqtSignal(str)        # fired when a map marker is shift-clicked (toggle multi-select)
+    selectedStationsChanged = pyqtSignal(str)     # JSON list of station codes, tells JS which markers to highlight
     basemapChanged = pyqtSignal(str)             # "light" | "dark"
     opacityChanged = pyqtSignal(int)             # 0-100
     legendReady = pyqtSignal(str)                # JSON legend spec for current product
@@ -151,6 +153,10 @@ class Bridge(QObject):
     @pyqtSlot(str)
     def selectStation(self, code: str):
         self.stationSelected.emit(str(code))
+
+    @pyqtSlot(str)
+    def selectStationShift(self, code: str):
+        self.stationShiftSelected.emit(str(code))
 
     @pyqtSlot(float, float)
     def reportCursorPosition(self, lat: float, lon: float):
@@ -179,6 +185,13 @@ class MainWindow(QMainWindow):
         self.home_lat: float | None = None
         self.home_lon: float | None = None
         self.home_active_stations: list | None = None
+
+        # Shift-click multi-select: an explicit, ordered list of station
+        # codes the user has manually armed by shift-clicking their markers.
+        # Overrides home_active_stations while non-empty; a plain (non-shift)
+        # station click clears it and goes back to single-station mode.
+        self.manual_stations: list = []
+        self._pending_manual_cached: dict = {}
 
         # Auto-refresh timing: measured from the actual gap between
         # consecutive volumes per station, rather than a fixed dropdown
@@ -317,6 +330,7 @@ class MainWindow(QMainWindow):
 
         self.bridge.readyFromJs.connect(self.on_js_ready)
         self.bridge.stationSelected.connect(self.on_station_selected_from_map)
+        self.bridge.stationShiftSelected.connect(self.on_station_shift_selected)
         self.bridge.cursorMoved.connect(self.on_cursor_moved)
         self.bridge.homeLocationClicked.connect(self.on_home_location_clicked)
 
@@ -331,6 +345,21 @@ class MainWindow(QMainWindow):
         self.bridge.basemapChanged.emit(self.basemap_combo.currentData())
         self.bridge.opacityChanged.emit(self.opacity_slider.value())
         self.refresh_now()
+
+    def _show_static_frame(self, overlays: list):
+        """Display a frame built from already-cached overlays (no fetch) —
+        used both when clicking an already-loaded station and when a
+        shift-click multi-select can be satisfied entirely from cache."""
+        self.play_timer.stop()
+        self.play_btn.setText("▶ Play")
+        self.play_btn.setEnabled(False)
+        self.history = [overlays]
+        self.history_index = 0
+        self.history_slider.blockSignals(True)
+        self.history_slider.setRange(0, 0)
+        self.history_slider.setEnabled(False)
+        self.history_slider.blockSignals(False)
+        self._display_current_frame()
 
     def on_station_selected_from_map(self, code: str):
         idx = self.station_combo.findData(code)
@@ -351,27 +380,76 @@ class MainWindow(QMainWindow):
                     break
 
         self.home_active_stations = None
+        if self.manual_stations:
+            self.manual_stations = []
+            self.bridge.selectedStationsChanged.emit(json.dumps([]))
         self.station_combo.blockSignals(True)
         self.station_combo.setCurrentIndex(idx)
         self.station_combo.blockSignals(False)
 
         if cached_overlay is not None:
-            self.play_timer.stop()
-            self.play_btn.setText("▶ Play")
-            self.play_btn.setEnabled(False)
-            self.history = [[cached_overlay]]
-            self.history_index = 0
-            self.history_slider.blockSignals(True)
-            self.history_slider.setRange(0, 0)
-            self.history_slider.setEnabled(False)
-            self.history_slider.blockSignals(False)
-            self._display_current_frame()
+            self._show_static_frame([cached_overlay])
             self.status.showMessage(
                 f"{code} — showing already-loaded data (click Refresh now for the newest volume)", 5000
             )
         else:
             self.reset_history()
             self.refresh_now()
+
+    def on_station_shift_selected(self, code: str):
+        """Shift-click toggles a station in/out of a manual multi-station
+        selection. Only stations not already cached in the current frame
+        get fetched — building up a selection one click at a time doesn't
+        re-download stations you've already got."""
+        if code in self.manual_stations:
+            self.manual_stations.remove(code)
+        else:
+            self.manual_stations.append(code)
+
+        self.home_active_stations = None
+        self.bridge.selectedStationsChanged.emit(json.dumps(self.manual_stations))
+
+        if not self.manual_stations:
+            self.status.showMessage("Selection cleared", 3000)
+            return
+
+        cached = {}
+        if self.history:
+            current_idx = max(0, min(self.history_index, len(self.history) - 1))
+            for ov in self.history[current_idx]:
+                cached[ov.station] = ov
+
+        missing = [st for st in self.manual_stations if st not in cached]
+
+        if not missing:
+            ordered = [cached[st] for st in self.manual_stations]
+            self._show_static_frame(ordered)
+            self.status.showMessage(f"Showing {' + '.join(self.manual_stations)}", 3000)
+            return
+
+        if self.worker is not None and self.worker.isRunning():
+            self.status.showMessage("Still fetching — try again in a moment", 3000)
+            return
+
+        self._pending_manual_cached = cached
+        self.status.showMessage(f"fetching {' + '.join(missing)}…")
+        self.worker = MultiRadarFetchWorker(missing)
+        self.worker.finished_ok.connect(self._on_manual_overlays_ready)
+        self.worker.finished_err.connect(self.on_overlay_error)
+        self.worker.start()
+
+    def _on_manual_overlays_ready(self, new_overlays: list):
+        cached = dict(self._pending_manual_cached)
+        for ov in new_overlays:
+            cached[ov.station] = ov
+        self._pending_manual_cached = {}
+
+        ordered = [cached[st] for st in self.manual_stations if st in cached]
+        if not ordered:
+            return
+        self._update_measured_refresh_interval(new_overlays)
+        self._show_static_frame(ordered)
+        self.status.showMessage(f"Showing {' + '.join(ov.station for ov in ordered)}", 3000)
 
     def current_station(self) -> str:
         return self.station_combo.currentData()
@@ -387,6 +465,9 @@ class MainWindow(QMainWindow):
 
     def on_station_changed(self, _index: int):
         self.home_active_stations = None
+        if self.manual_stations:
+            self.manual_stations = []
+            self.bridge.selectedStationsChanged.emit(json.dumps([]))
         self.reset_history()
         self.refresh_now()
 
@@ -438,6 +519,9 @@ class MainWindow(QMainWindow):
         self.home_lat = lat
         self.home_lon = lon
         self.home_active_stations = radar_source.find_closest_stations(lat, lon, n=HOME_STATION_COUNT)
+        if self.manual_stations:
+            self.manual_stations = []
+            self.bridge.selectedStationsChanged.emit(json.dumps([]))
         self.home_status_label.setText(f"Home set — showing {', '.join(self.home_active_stations)}")
         self.bridge.homeMarkerReady.emit(json.dumps({"lat": lat, "lon": lon}))
         self.reset_history()
@@ -523,7 +607,12 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             return
         selected_code = self.current_station()
-        stations = self.home_active_stations if self.home_active_stations else [selected_code]
+        if self.manual_stations:
+            stations = self.manual_stations
+        elif self.home_active_stations:
+            stations = self.home_active_stations
+        else:
+            stations = [selected_code]
 
         self.status.showMessage(f"fetching {' + '.join(stations)}…")
         self.refresh_btn.setEnabled(False)
