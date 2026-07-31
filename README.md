@@ -1,4 +1,6 @@
-# ontheball — web basemap prototype (v0.8.0)
+# ontheball — web basemap prototype (v0.8.1)
+
+![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 
 ## Install (one-time)
 
@@ -66,6 +68,20 @@ to a specific one if a change ever needs rolling back. The `__version__`
 string in `ontheball_web.py` and the version in this title still get
 bumped each notable change, just as a quick human-readable marker
 alongside the commit history — not as the primary safety net anymore.
+
+## What's new in v0.8.1 — merged grid passes to cut station-click delay
+
+- **`_grid_and_render` now does 2 `grid_from_radars` passes instead of 4.**
+  Reflectivity, Base Velocity, and ZDR all use identical gate criteria (just
+  the reflectivity floor), so they're now gridded together in one shared
+  pass instead of three separate ones — that interpolation step is the
+  expensive part of a station click, so this should meaningfully cut the
+  delay between clicking a station and seeing it update.
+  Correlation Coefficient stays on its own dedicated pass, since its extra
+  low-quality-gate exclusion would otherwise incorrectly mask valid
+  reflectivity/velocity/ZDR data wherever only CC happened to be noisy —
+  merging it in would trade speed for a real data-quality regression, so it
+  didn't.
 
 ## What's new in v0.8.0 — ZDR product, legend hover-highlight, parallel Home fetch
 
