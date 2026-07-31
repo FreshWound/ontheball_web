@@ -2,6 +2,18 @@
 
 ![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 
+A Linux-native, GR2Analyst-style live NEXRAD radar viewer — Reflectivity,
+Base Velocity, Correlation Coefficient, and Differential Reflectivity (ZDR),
+pulled straight from NOAA/Unidata's free public archive, rendered onto a
+real interactive map (pan/zoom, station click-to-swap, NWS warning
+polygons). No Windows, no paid license, no API key.
+
+**Trying it out for the first time?** See [Install](#install-one-time) and
+[Run](#run) below — or just run `./install.sh` once and `./run.sh` each
+time after. Found a bug or something doesn't render right for your
+station? Open a GitHub issue — that kind of report is exactly what's
+useful at this stage.
+
 ## Install (one-time)
 
 Using a virtual environment keeps these dependencies isolated from your
@@ -20,7 +32,7 @@ source .venv/bin/activate
 
 # Install everything the app needs — inside a venv, no --break-system-packages needed
 pip install --upgrade pip
-pip install PyQt6 PyQt6-WebEngine arm_pyart boto3 numpy matplotlib cmweather scipy
+pip install -r requirements.txt
 ```
 
 If PyQt6 complains about a missing xcb-cursor plugin on a fresh system,
@@ -46,13 +58,17 @@ source .venv/bin/activate   # if not already active
 python3 ontheball_web.py
 ```
 
-A window opens with a station picker, "Refresh now", and an auto-refresh
-interval dropdown. It fetches the latest volume for the selected station
-from `s3://unidata-nexrad-level2` (free, anonymous), decodes + clutter-filters
-it with Py-ART exactly like before, grids it, and renders it onto the map
-as a semi-transparent overlay. The basemap itself is loaded live from
-OpenFreeMap (`tiles.openfreemap.org`) — needs your normal internet access,
-no API key.
+A window opens with a Station picker, a Product dropdown (Reflectivity,
+Base Velocity, Correlation Coefficient, ZDR), a Basemap toggle, a radar
+opacity slider, "Refresh now", and an auto-refresh checkbox. It fetches
+the latest volume for the selected station from
+`s3://unidata-nexrad-level2` (free, anonymous), decodes + clutter-filters
+it with Py-ART, grids it, and renders it onto the map as a semi-transparent
+overlay — hovering the map shows the real value under the cursor
+highlighted on the legend. Enter a Home Location (or click the map) to
+load and track the 3 closest stations automatically. The basemap itself
+is loaded live from OpenFreeMap (`tiles.openfreemap.org`) — needs your
+normal internet access, no API key.
 
 <!--
 MAINTENANCE NOTE: Install (one-time) and Run stay as the first two

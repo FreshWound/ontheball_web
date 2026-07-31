@@ -1,0 +1,9 @@
+PyQt6
+PyQt6-WebEngine
+arm_pyart
+boto3
+numpy
+matplotlib
+cmweather
+scipy
+pyproj
