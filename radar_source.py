@@ -447,23 +447,25 @@ def _field_to_png_base64(field: np.ndarray, vmin: float, vmax: float, cmap, tran
 
 
 def _grid_and_render(radar, origin_lat: float, origin_lon: float):
-    # 1. Dedicated Reflectivity GateFilter
-    refl_gf = pyart.filters.GateFilter(radar)
-    refl_gf.exclude_below("reflectivity", REFLECTIVITY_FLOOR)
+    # Reflectivity, Velocity, and ZDR all share identical gate criteria (just
+    # the reflectivity floor), so they're gridded together in a single
+    # grid_from_radars() pass below — that's the expensive step, and doing
+    # it once for all three instead of three times is the main win here.
+    #
+    # Correlation Coefficient additionally excludes its own low-quality gates
+    # (ρHV < CORR_COEFF_MIN), and grid_from_radars applies one gatefilter to
+    # every field in a given call — so if CC were merged into the same pass,
+    # its extra exclusion would incorrectly blank out valid reflectivity/
+    # velocity/ZDR data at gates where only CC happened to be noisy. CC keeps
+    # its own dedicated gatefilter and grid pass to avoid that cross-
+    # contamination.
+    shared_gf = pyart.filters.GateFilter(radar)
+    shared_gf.exclude_below("reflectivity", REFLECTIVITY_FLOOR)
 
-    # 2. Dedicated Velocity GateFilter: floor filter only to avoid masking distant returns
-    vel_gf = pyart.filters.GateFilter(radar)
-    vel_gf.exclude_below("reflectivity", REFLECTIVITY_FLOOR)
-
-    # 3. Dedicated Correlation Coefficient GateFilter
     cc_gf = pyart.filters.GateFilter(radar)
     cc_gf.exclude_below("reflectivity", REFLECTIVITY_FLOOR)
     if "cross_correlation_ratio" in radar.fields:
         cc_gf.exclude_below("cross_correlation_ratio", CORR_COEFF_MIN)
-
-    # 4. Dedicated Differential Reflectivity (ZDR) GateFilter
-    zdr_gf = pyart.filters.GateFilter(radar)
-    zdr_gf.exclude_below("reflectivity", REFLECTIVITY_FLOOR)
 
     # Dealias Base Velocity if present
     if "velocity" in radar.fields:
@@ -484,31 +486,31 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
     notes = {}
     grid_fields = {}   # product_key -> raw masked ndarray (post-scale), for cursor hover lookups
 
-    # --- Pass A: Reflectivity ---
-    refl_grid = pyart.map.grid_from_radars(
-        (radar,), gatefilters=(refl_gf,),
+    # --- Pass A: Reflectivity + Base Velocity + ZDR (one shared grid pass) ---
+    shared_field_names = ["reflectivity"]
+    if "velocity" in radar.fields:
+        shared_field_names.append("velocity")
+    if "differential_reflectivity" in radar.fields:
+        shared_field_names.append("differential_reflectivity")
+
+    shared_grid = pyart.map.grid_from_radars(
+        (radar,), gatefilters=(shared_gf,),
         grid_shape=(1, GRID_CELLS, GRID_CELLS),
         grid_limits=((0, 1000), (-GRID_RANGE_M, GRID_RANGE_M), (-GRID_RANGE_M, GRID_RANGE_M)),
-        fields=["reflectivity"],
+        fields=shared_field_names,
     )
+
     cfg_refl = PRODUCTS["reflectivity"]
-    refl_data = refl_grid.fields["reflectivity"]["data"][0]
+    refl_data = shared_grid.fields["reflectivity"]["data"][0]
     products["reflectivity"] = _field_to_png_base64(
         refl_data, cfg_refl["vmin"], cfg_refl["vmax"], cfg_refl["cmap"](), cfg_refl["transparent_below"]
     )
     available.append("reflectivity")
     grid_fields["reflectivity"] = refl_data
 
-    # --- Pass B: Base Velocity ---
-    if "velocity" in radar.fields:
-        vel_grid = pyart.map.grid_from_radars(
-            (radar,), gatefilters=(vel_gf,),
-            grid_shape=(1, GRID_CELLS, GRID_CELLS),
-            grid_limits=((0, 1000), (-GRID_RANGE_M, GRID_RANGE_M), (-GRID_RANGE_M, GRID_RANGE_M)),
-            fields=["velocity"],
-        )
+    if "velocity" in shared_field_names:
         cfg_vel = PRODUCTS["velocity"]
-        vel_data = vel_grid.fields["velocity"]["data"][0]
+        vel_data = shared_grid.fields["velocity"]["data"][0]
         vel_mask = np.ma.getmaskarray(vel_data) if np.ma.is_masked(vel_data) else np.zeros(vel_data.shape, dtype=bool)
 
         if not vel_mask.all():
@@ -525,7 +527,23 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
     else:
         notes["velocity"] = "not present in this volume (radar may have been in a reflectivity-only/clear-air scan)"
 
-    # --- Pass C: Correlation Coefficient ---
+    if "differential_reflectivity" in shared_field_names:
+        cfg_zdr = PRODUCTS["differential_reflectivity"]
+        zdr_data = shared_grid.fields["differential_reflectivity"]["data"][0]
+        zdr_mask = np.ma.getmaskarray(zdr_data) if np.ma.is_masked(zdr_data) else np.zeros(zdr_data.shape, dtype=bool)
+
+        if not zdr_mask.all():
+            products["differential_reflectivity"] = _field_to_png_base64(
+                zdr_data, cfg_zdr["vmin"], cfg_zdr["vmax"], cfg_zdr["cmap"](), cfg_zdr["transparent_below"]
+            )
+            available.append("differential_reflectivity")
+            grid_fields["differential_reflectivity"] = zdr_data
+        else:
+            notes["differential_reflectivity"] = "no gates passed quality filtering this scan"
+    else:
+        notes["differential_reflectivity"] = "not present in this volume (radar may have been in a legacy/non-dual-pol scan)"
+
+    # --- Pass B: Correlation Coefficient (separate pass — see note above) ---
     if "cross_correlation_ratio" in radar.fields:
         cc_grid = pyart.map.grid_from_radars(
             (radar,), gatefilters=(cc_gf,),
@@ -547,29 +565,6 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
             notes["correlation_coefficient"] = "no gates passed quality filtering this scan"
     else:
         notes["correlation_coefficient"] = "not present in this volume"
-
-    # --- Pass D: Differential Reflectivity (ZDR) ---
-    if "differential_reflectivity" in radar.fields:
-        zdr_grid = pyart.map.grid_from_radars(
-            (radar,), gatefilters=(zdr_gf,),
-            grid_shape=(1, GRID_CELLS, GRID_CELLS),
-            grid_limits=((0, 1000), (-GRID_RANGE_M, GRID_RANGE_M), (-GRID_RANGE_M, GRID_RANGE_M)),
-            fields=["differential_reflectivity"],
-        )
-        cfg_zdr = PRODUCTS["differential_reflectivity"]
-        zdr_data = zdr_grid.fields["differential_reflectivity"]["data"][0]
-        zdr_mask = np.ma.getmaskarray(zdr_data) if np.ma.is_masked(zdr_data) else np.zeros(zdr_data.shape, dtype=bool)
-
-        if not zdr_mask.all():
-            products["differential_reflectivity"] = _field_to_png_base64(
-                zdr_data, cfg_zdr["vmin"], cfg_zdr["vmax"], cfg_zdr["cmap"](), cfg_zdr["transparent_below"]
-            )
-            available.append("differential_reflectivity")
-            grid_fields["differential_reflectivity"] = zdr_data
-        else:
-            notes["differential_reflectivity"] = "no gates passed quality filtering this scan"
-    else:
-        notes["differential_reflectivity"] = "not present in this volume (radar may have been in a legacy/non-dual-pol scan)"
 
     coords = _corners_latlon(origin_lat, origin_lon, GRID_RANGE_M)
     return products, available, notes, coords, grid_fields
