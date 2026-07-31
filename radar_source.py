@@ -14,6 +14,7 @@ import base64
 import io
 import json
 import tempfile
+import time
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -623,19 +624,35 @@ def get_latest_overlay(station: str = "KIWX") -> RadarOverlay:
     if station not in STATIONS:
         raise ValueError(f"Unknown station {station!r}; choices are {list(STATIONS)}")
 
+    t_start = time.perf_counter()
     try:
         key = _latest_key(station)
+        t_key = time.perf_counter()
         if key is None:
             raise RuntimeError(f"No recent volumes found for {station}")
         s3 = _s3_client()
         with tempfile.NamedTemporaryFile(suffix=".ar2v") as tmp:
             s3.download_fileobj(BUCKET, key, tmp)
             tmp.flush()
+            t_download = time.perf_counter()
+            file_size_mb = tmp.tell() / (1024 * 1024)
             radar = pyart.io.read_nexrad_archive(tmp.name)
+            t_parse = time.perf_counter()
 
         origin_lat = float(radar.latitude["data"][0])
         origin_lon = float(radar.longitude["data"][0])
         products, available, notes, coords, grid_fields = _grid_and_render(radar, origin_lat, origin_lon)
+        t_grid = time.perf_counter()
+
+        print(
+            f"[timing] {station}: "
+            f"find-key {t_key - t_start:.2f}s | "
+            f"download {t_download - t_key:.2f}s ({file_size_mb:.1f} MB) | "
+            f"parse {t_parse - t_download:.2f}s | "
+            f"grid+render {t_grid - t_parse:.2f}s | "
+            f"total {t_grid - t_start:.2f}s"
+        )
+
         volume_time = key.split("/")[-1]
         return RadarOverlay(
             products=products,

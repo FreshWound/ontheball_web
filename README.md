@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.8.2)
+# ontheball — web basemap prototype (v0.8.3)
 
 ![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 
@@ -84,6 +84,16 @@ to a specific one if a change ever needs rolling back. The `__version__`
 string in `ontheball_web.py` and the version in this title still get
 bumped each notable change, just as a quick human-readable marker
 alongside the commit history — not as the primary safety net anymore.
+
+## What's new in v0.8.3 — per-stage load timing (diagnostic only)
+
+- `get_latest_overlay()` now prints a `[timing]` line to the terminal for
+  every station fetch, breaking down where the time actually goes:
+  finding the latest key on S3, downloading the volume (with file size),
+  parsing it with Py-ART, and gridding/rendering. No behavior change —
+  this is purely to answer "why did that station take 22 seconds" with
+  real numbers instead of guessing, before deciding what (if anything)
+  to optimize next.
 
 ## What's new in v0.8.2 — instant switch to already-loaded stations
 
