@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.9.0)
+# ontheball — web basemap prototype (v0.9.1)
 
 ![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 
@@ -84,6 +84,15 @@ to a specific one if a change ever needs rolling back. The `__version__`
 string in `ontheball_web.py` and the version in this title still get
 bumped each notable change, just as a quick human-readable marker
 alongside the commit history — not as the primary safety net anymore.
+
+## What's new in v0.9.1 — fix shift-click not registering / stray zoom-in
+
+- Shift-click wasn't working, and occasionally the map would snap-zoom in
+  extremely far instead. Root cause: MapLibre's built-in shift+drag
+  box-zoom handler grabs `mousedown` before our marker's `click` listener
+  ever fires, and interprets a near-zero-size drag as a valid (tiny) zoom
+  target. Disabled `map.boxZoom` outright — this app has no use for it, and
+  it directly conflicted with shift being our multi-select modifier.
 
 ## What's new in v0.9.0 — shift-click multi-station select
 

@@ -259,6 +259,16 @@
       fadeDuration: 0
     });
 
+    // Shift is our multi-select modifier (shift-click a station marker),
+    // which directly collides with MapLibre's built-in shift+drag box-zoom
+    // gesture. Left enabled, box-zoom's mousedown handler grabs the
+    // gesture before our marker's click listener ever fires — that's why
+    // shift-click wasn't registering at all, and why it occasionally
+    // snap-zoomed into a tiny box instead (a near-zero-size drag is still
+    // a valid box-zoom target as far as MapLibre's concerned). Not a
+    // feature this app otherwise uses, so just disable it outright.
+    map.boxZoom.disable();
+
     map.addControl(new maplibregl.NavigationControl());
 
     function prioritizePlaceLabels() {
