@@ -224,12 +224,37 @@ REFLECTIVITY_MAX = 75.0        # dBZ, colormap ceiling
 CORR_COEFF_MIN = 0.80          # threshold for dedicated correlation-coefficient overlay filtering
 GRID_RANGE_M = 460_000.0       # +/- range from radar — full NEXRAD base reflectivity range (~248nm/459km), not the old 230km half-range
 GRID_CELLS = 460               # ~2km pixels over 460km — same cell count as before (230km @ 1km), so Barnes interpolation cost stays roughly flat despite doubled range
-# Confirmed against real storms (KIWX, v0.10.2): h_factor=4.0 fixed the short-range
-# issue and improved single-tilt rendering, but oversmoothed — spread reflectivity
-# into areas with no real return (visible over IL/WI/OH in testing). Settled on
-# 3.0 as a middle ground per side-by-side comparison against GR2Analyst. Revisit
-# if a "reduce smoothing" toggle gets built (see CHANGELOG open items).
-EXPERIMENTAL_H_FACTOR = 3.0
+# Confirmed against real storms (KIWX, v0.10.2): a wide dist_beam ROI (h_factor=4.0)
+# fixed the short-range/tilt-dropout issue, but oversmoothed — confirmed via the
+# Kokomo comparison (real NWS data showed distinct storm cells; ours showed a
+# smeared blob with no cell structure at all). h_factor=3.0 is a bit better but
+# still visibly softer than GR2Analyst/NWS at the pixel level. Rather than pick
+# one fixed tradeoff, this is now a runtime toggle (see RANGE_H_FACTOR /
+# DETAIL_H_FACTOR + set_smoothing_mode below) — "Range" mode keeps far-range
+# coverage, "Detail" mode favors sharp, true-to-source structure over range.
+RANGE_H_FACTOR = 3.0           # favors far-range coverage (some smearing near-range)
+DETAIL_H_FACTOR = 1.0          # Py-ART's own default — favors sharp/accurate detail (shorter effective range)
+RANGE_MIN_RADIUS = 1000.0
+DETAIL_MIN_RADIUS = 250.0      # Py-ART's own default
+_detail_mode = False           # current UI toggle state; flipped via set_smoothing_mode()
+
+
+def set_smoothing_mode(detail_mode: bool):
+    """Called from the UI toggle. True = prioritize sharp/accurate detail
+    (shorter effective range); False = prioritize far-range coverage (some
+    smearing of isolated cells). Takes effect on the next grid/render call —
+    does not require a fresh S3 fetch, just a re-render from the cached raw
+    radar object."""
+    global _detail_mode
+    _detail_mode = bool(detail_mode)
+
+
+def _current_roi_params():
+    if _detail_mode:
+        return DETAIL_H_FACTOR, DETAIL_MIN_RADIUS
+    return RANGE_H_FACTOR, RANGE_MIN_RADIUS
+
+
 SMOOTH_SIGMA = 0.0             # disabled smoothing to preserve intense core details
 
 
@@ -475,6 +500,8 @@ def _field_to_png_base64(field: np.ndarray, vmin: float, vmax: float, cmap, tran
 
 
 def _grid_and_render(radar, origin_lat: float, origin_lon: float):
+    h_factor, min_radius = _current_roi_params()
+
     # Reflectivity, Velocity, and ZDR all share identical gate criteria (just
     # the reflectivity floor), so they're gridded together in a single
     # grid_from_radars() pass below — that's the expensive step, and doing
@@ -531,7 +558,7 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
         # height at NEXRAD's long ranges (curvature + elevation angle), so the
         # default ROI drops those gates entirely past a certain range. Widening
         # h_factor lets far-range/high-beam gates still register at z=0.
-        roi_func="dist_beam", h_factor=EXPERIMENTAL_H_FACTOR, min_radius=1000.0,
+        roi_func="dist_beam", h_factor=h_factor, min_radius=min_radius,
     )
 
     cfg_refl = PRODUCTS["reflectivity"]
@@ -584,7 +611,7 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
             grid_shape=(1, GRID_CELLS, GRID_CELLS),
             grid_limits=((0, 1000), (-GRID_RANGE_M, GRID_RANGE_M), (-GRID_RANGE_M, GRID_RANGE_M)),
             fields=["cross_correlation_ratio"],
-            roi_func="dist_beam", h_factor=EXPERIMENTAL_H_FACTOR, min_radius=1000.0,
+            roi_func="dist_beam", h_factor=h_factor, min_radius=min_radius,
         )
         cfg_cc = PRODUCTS["correlation_coefficient"]
         cc_data = cc_grid.fields["cross_correlation_ratio"]["data"][0]

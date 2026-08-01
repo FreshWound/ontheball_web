@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.2"
+__version__ = "0.10.3"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -268,6 +268,17 @@ class MainWindow(QMainWindow):
         self.auto_refresh_checkbox = QCheckBox()
         self.auto_refresh_checkbox.toggled.connect(self.on_auto_refresh_toggled)
         controls.addWidget(self.auto_refresh_checkbox)
+
+        controls.addWidget(QLabel("Reduce smoothing:"))
+        self.detail_mode_checkbox = QCheckBox()
+        self.detail_mode_checkbox.setToolTip(
+            "Off (default): wider search radius, better far-range coverage, some "
+            "blurring of small/isolated cells.\n"
+            "On: Py-ART's own defaults — sharper, more true-to-source detail, "
+            "but real data may drop out sooner at long range."
+        )
+        self.detail_mode_checkbox.toggled.connect(self.on_detail_mode_toggled)
+        controls.addWidget(self.detail_mode_checkbox)
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -488,6 +499,21 @@ class MainWindow(QMainWindow):
             self.auto_timer.start(self.auto_refresh_interval_sec * 1000)
         else:
             self.auto_timer.stop()
+
+    def on_detail_mode_toggled(self, checked: bool):
+        radar_source.set_smoothing_mode(checked)
+        if not self.history:
+            return
+        idx = max(0, min(self.history_index, len(self.history) - 1))
+        if len(self.history[idx]) == 1:
+            # Single-station view: re-render from the already-cached raw
+            # radar object (no new S3 fetch needed) — same path used when
+            # switching tilts.
+            self.on_tilt_changed(self.tilt_combo.currentIndex())
+        else:
+            # Multi-station (Home/manual select) has no equivalent cached
+            # re-render path yet, so fall back to a full refresh.
+            self.refresh_now()
 
     def on_station_changed(self, _index: int):
         self.home_active_stations = None

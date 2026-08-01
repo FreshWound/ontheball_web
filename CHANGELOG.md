@@ -2,6 +2,34 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.3 — "Reduce smoothing" toggle, Kokomo mystery solved
+
+- New checkbox next to Auto-refresh: **Reduce smoothing**. Off (default) uses
+  the wider `dist_beam` ROI from v0.10.2 (`h_factor=3.0`, `min_radius=1000`) —
+  better far-range coverage, some blurring of small/isolated cells. On uses
+  Py-ART's own defaults (`h_factor=1.0`, `min_radius=250`) — sharp, true-to-
+  source detail, but real data may drop out sooner at long range. Toggling
+  re-renders instantly from the already-cached raw radar object in single-
+  station view (no new S3 fetch); falls back to a full refresh in multi-
+  station (Home/manual-select) view, which has no equivalent cached re-render
+  path yet.
+- Root cause found for the "Kokomo cell missing under multi-station select"
+  mystery from v0.10.2: side-by-side against NWS's radar.weather.gov (real
+  distinct storm cells near Kokomo/Converse/Greentown) vs. otb's composite at
+  a similar time (a smooth blob, no cell structure at all) confirmed this was
+  never a multi-station merge bug — it's the same `h_factor` oversmoothing
+  hitting an isolated cell hard enough to erase it. The single-station-only
+  comparison originally requested to isolate the multi-station theory turned
+  out not to be needed once this evidence came in.
+- Open items noted, not yet started: a possible shading/legend mismatch
+  (hovering a visually-yellow map area showed a blue-range value highlighted
+  on the legend) — code review of the hover-sampling and colormap pipeline
+  didn't turn up an obvious bug, but couldn't be reproduced against the
+  screenshots provided since the weather had changed; a toggle to remove
+  smoothing (**done above**); playback "blink" during frame transitions,
+  flagged by Fresh as likely a multi-day fix; nearest-surface-temperature
+  hover pulled from Wunderground.
+
 ## What's new in v0.10.2 — real NEXRAD range, less short-range clipping
 
 - Grid range doubled: `GRID_RANGE_M` was 230km (~124nm), about half of NEXRAD's
