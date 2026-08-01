@@ -2,6 +2,37 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.4 — likely fix for the shading/legend mismatch
+
+- Found a real cause for the "cursor visually on orange, legend reads a blue
+  value" mismatch reported against KTLH: MapLibre's image/raster sources
+  default to bilinear ('linear') texture filtering, and we'd never set
+  `raster-resampling`. With GRID_CELLS still at 460 over the now-doubled
+  460km range, each grid cell covers ~2km — coarse enough that at a normal
+  zoom level, the browser is smoothly blending colors between neighboring
+  cells for display, while the legend hover-readout (`sample_value`) reports
+  the exact underlying cell's raw, un-blended value. Near a strong edge
+  (e.g. the boundary of an isolated storm cell) those two can disagree by a
+  lot — which lines up with what got reported (visually orange from
+  blending toward a nearby high-value cell, while the true nearest-cell
+  value was a real ~15.59 dBZ, solidly in the cyan/blue range on our
+  anchors). Set `'raster-resampling': 'nearest'` on the radar raster layer
+  in map.html so the displayed color always matches the true underlying grid
+  cell — the tradeoff is the map now looks blockier/more pixelated at close
+  zoom (which, worth noting, is closer to how GR2Analyst's own super-res
+  imagery actually looks, not smoother).
+- Not yet confirmed: whether this fully explains the reported mismatch, or
+  whether there's an additional coordinate/sampling bug underneath it. Given
+  the size of the discrepancy in the screenshot, worth a direct before/after
+  comparison against the same spot once this build is running.
+- Also reviewed the 0.9° tilt vs. GR2Analyst comparison from the same
+  session: otb showed a much smaller area of light-rain coverage around the
+  storm core than GR2. Best guess pending confirmation: this may just be
+  "Reduce smoothing" doing exactly what it's for — Detail mode's tight ROI
+  (h_factor=1.0) won't reach out to catch widespread low-reflectivity
+  stratiform returns the way Range mode's wider ROI does. If the checkbox
+  was off in that screenshot, this needs a fresh look instead.
+
 ## What's new in v0.10.3 — "Reduce smoothing" toggle, Kokomo mystery solved
 
 - New checkbox next to Auto-refresh: **Reduce smoothing**. Off (default) uses
