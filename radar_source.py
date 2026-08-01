@@ -745,21 +745,33 @@ def render_composite(station: str) -> RadarOverlay:
 
 
 def render_tilt(station: str, sweep: int) -> RadarOverlay:
-    """Re-grid a single elevation sweep from the already-cached raw radar
-    object for this station — no S3 fetch, just extracting one sweep and
-    running it through the same gridding pipeline. Raises RuntimeError if
-    nothing's cached for this station yet (e.g. it was never actually
-    loaded, only picked from the dropdown)."""
+    """Re-grid a single elevation angle from the already-cached raw radar
+    object for this station — no S3 fetch. Raises RuntimeError if nothing's
+    cached for this station yet (e.g. it was never actually loaded, only
+    picked from the dropdown).
+
+    Split-cut VCPs scan the lowest tilt(s) twice: once at low PRF for
+    full-range reflectivity, once at high PRF for velocity/dual-pol (whose
+    much shorter unambiguous range range-folds/masks reflectivity beyond
+    it). Extracting only the first duplicate sweep at a given angle can
+    silently grab the range-limited one and make a real storm look nearly
+    empty. To avoid that, every sweep sharing this angle gets extracted
+    together, so whichever one actually has full-range data for a given
+    product is what ends up gridded — same principle the full composite
+    already relies on."""
     cached = _RAW_RADAR_CACHE.get(station)
     if cached is None:
         raise RuntimeError(f"No cached volume for {station} — load it normally first")
     radar = cached["radar"]
 
-    single_sweep_radar = radar.extract_sweeps([sweep])
+    angles = radar.fixed_angle["data"]
+    target_angle = round(float(angles[sweep]), 1)
+    matching_sweeps = [i for i, a in enumerate(angles) if round(float(a), 1) == target_angle]
+
+    single_sweep_radar = radar.extract_sweeps(matching_sweeps)
     origin_lat = float(radar.latitude["data"][0])
     origin_lon = float(radar.longitude["data"][0])
     products, available, notes, coords, grid_fields = _grid_and_render(single_sweep_radar, origin_lat, origin_lon)
-    angle = float(single_sweep_radar.fixed_angle["data"][0])
 
     return RadarOverlay(
         products=products,
@@ -767,7 +779,7 @@ def render_tilt(station: str, sweep: int) -> RadarOverlay:
         product_notes=notes,
         coordinates=coords,
         station=station,
-        volume_time=f"{cached['volume_time']} ({angle:.1f}° tilt)",
+        volume_time=f"{cached['volume_time']} ({target_angle:.1f}° tilt)",
         source="live-tilt",
         grid_fields=grid_fields,
         origin_lat=origin_lat,

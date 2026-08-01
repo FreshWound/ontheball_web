@@ -17,6 +17,16 @@ Version-by-version history of what changed and why. See [README.md](README.md) f
   them), but the LIVE/DEMO status label only checked for the exact string
   `"live"` — anything else, including a perfectly real tilt render, got
   called DEMO. Now treats `"live-tilt"` as LIVE too.
+- Also fixed: some tilts (e.g. 0.9°) could show a real storm as nearly
+  empty even though a taller-storm test ruled out simple beam-overshoot.
+  Root cause: split-cut VCPs scan the lowest tilt(s) twice — once at low
+  PRF for full-range reflectivity, once at high PRF for velocity/dual-pol,
+  whose much shorter unambiguous range range-folds/masks reflectivity
+  beyond it. `render_tilt()` was only extracting the first duplicate sweep
+  at a given angle, which could silently grab the range-limited one. Now
+  extracts every sweep sharing that angle together, so whichever one
+  actually has full-range data for a given product gets used — same
+  principle the full composite already relies on.
 
 ## What's new in v0.10.0 — Tilt selection (single-station view)
 
