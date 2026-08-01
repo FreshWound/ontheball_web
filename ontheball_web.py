@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.9.2"
+__version__ = "0.10.1"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -236,6 +236,14 @@ class MainWindow(QMainWindow):
             self.product_combo.addItem(cfg["label"], userData=key)
         self.product_combo.currentIndexChanged.connect(self.on_product_changed)
         controls.addWidget(self.product_combo)
+
+        controls.addWidget(QLabel("Tilt:"))
+        self.tilt_combo = QComboBox()
+        self.tilt_combo.addItem("—", userData=None)
+        self.tilt_combo.setEnabled(False)
+        self.tilt_combo.setToolTip("Only available for a single loaded station (not Home/multi-select view)")
+        self.tilt_combo.currentIndexChanged.connect(self.on_tilt_changed)
+        controls.addWidget(self.tilt_combo)
 
         controls.addWidget(QLabel("Basemap:"))
         self.basemap_combo = QComboBox()
@@ -728,7 +736,53 @@ class MainWindow(QMainWindow):
         frame_tag = "live" if is_live else f"frame {idx + 1}/{len(self.history)}"
         time_str = " / ".join([ov.volume_time for ov in overlays])
         self.history_label.setText(f"{frame_tag} — {time_str}")
+        self._sync_tilt_dropdown(overlays)
         self._emit_overlays(overlays)
+
+    def _sync_tilt_dropdown(self, overlays: list):
+        """Tilt selection only makes sense for a single displayed station —
+        Home/multi-select frames can each be on a different VCP with a
+        different set of available elevation angles, so there's no one
+        Tilt list that would apply to all of them at once."""
+        self.tilt_combo.blockSignals(True)
+        self.tilt_combo.clear()
+
+        if len(overlays) == 1 and overlays[0].source in ("live", "live-tilt") and overlays[0].available_tilts:
+            overlay = overlays[0]
+            self.tilt_combo.addItem("Composite (all tilts)", userData=None)
+            for t in overlay.available_tilts:
+                self.tilt_combo.addItem(f"{t['angle']:.1f}°", userData=t["sweep"])
+            found_idx = self.tilt_combo.findData(overlay.current_tilt_sweep)
+            self.tilt_combo.setCurrentIndex(found_idx if found_idx >= 0 else 0)
+            self.tilt_combo.setEnabled(True)
+        else:
+            self.tilt_combo.addItem("—", userData=None)
+            self.tilt_combo.setEnabled(False)
+
+        self.tilt_combo.blockSignals(False)
+
+    def on_tilt_changed(self, _index: int):
+        if not self.history:
+            return
+        idx = max(0, min(self.history_index, len(self.history) - 1))
+        overlays = self.history[idx]
+        if len(overlays) != 1:
+            return
+
+        station = overlays[0].station
+        sweep = self.tilt_combo.currentData()
+
+        try:
+            if sweep is None:
+                new_overlay = radar_source.render_composite(station)
+            else:
+                new_overlay = radar_source.render_tilt(station, sweep)
+        except RuntimeError as exc:
+            self.status.showMessage(str(exc), 5000)
+            return
+
+        self.history[idx] = [new_overlay]
+        self._display_current_frame()
 
     def _emit_overlays(self, overlays: list):
         product = self.current_product()
@@ -745,7 +799,7 @@ class MainWindow(QMainWindow):
                 prod_to_use = overlay.available_products[0]
 
             shown_label = radar_source.PRODUCTS[prod_to_use]["label"]
-            tag = "LIVE" if overlay.source == "live" else "DEMO"
+            tag = "LIVE" if overlay.source in ("live", "live-tilt") else "DEMO"
 
             payload_items.append({
                 "png_b64": overlay.products[prod_to_use],

@@ -343,6 +343,8 @@ class RadarOverlay:
     grid_fields: dict = None   # product_key -> raw masked ndarray (already in display units), for hover lookups
     origin_lat: float = None   # radar site lat, used to re-project cursor lat/lon back to a grid pixel
     origin_lon: float = None
+    available_tilts: list = None   # [{"sweep": int, "angle": float}, ...] for this volume, low-to-high; None if unknown
+    current_tilt_sweep: int = None  # which sweep index this overlay was actually gridded from (0 = default composite)
 
 
 def sample_value(overlay: "RadarOverlay", product_key: str, lat: float, lon: float):
@@ -387,6 +389,15 @@ def sample_value(overlay: "RadarOverlay", product_key: str, lat: float, lon: flo
 
 
 _S3_CLIENT = None
+
+# Raw decoded Py-ART Radar objects, one per station — the full multi-sweep
+# volume, kept around after the initial fetch so switching Tilt can just
+# re-grid a single sweep from what's already in memory instead of hitting
+# S3 again. Only the most recent volume per station is kept (not history),
+# and only for stations that have actually been loaded — memory cost scales
+# with however many distinct stations are on screen, not with time.
+# Each entry: {"radar": Radar, "volume_time": str}
+_RAW_RADAR_CACHE: dict = {}
 
 
 def _s3_client():
@@ -630,6 +641,22 @@ def _synthetic_demo(station: str) -> RadarOverlay:
     )
 
 
+def _available_tilts(radar) -> list:
+    """Deduplicated list of {"sweep": index, "angle": degrees} for a volume,
+    lowest elevation first. NEXRAD VCPs commonly scan the lowest tilt(s)
+    twice — once at reduced PRF for a cleaner reflectivity return, once at
+    higher PRF for velocity/dual-pol — so raw fixed_angle data often has
+    repeated angles; we keep the first sweep index seen for each distinct
+    angle rather than exposing both as separate picks."""
+    angles = radar.fixed_angle["data"]
+    seen = {}
+    for sweep_idx, angle in enumerate(angles):
+        angle = round(float(angle), 1)
+        if angle not in seen:
+            seen[angle] = sweep_idx
+    return [{"sweep": seen[a], "angle": a} for a in sorted(seen)]
+
+
 def get_latest_overlay(station: str = "KIWX") -> RadarOverlay:
     if station not in STATIONS:
         raise ValueError(f"Unknown station {station!r}; choices are {list(STATIONS)}")
@@ -654,6 +681,10 @@ def get_latest_overlay(station: str = "KIWX") -> RadarOverlay:
         products, available, notes, coords, grid_fields = _grid_and_render(radar, origin_lat, origin_lon)
         t_grid = time.perf_counter()
 
+        volume_time = key.split("/")[-1]
+        _RAW_RADAR_CACHE[station] = {"radar": radar, "volume_time": volume_time}
+        available_tilts = _available_tilts(radar)
+
         print(
             f"[timing] {station}: "
             f"find-key {t_key - t_start:.2f}s | "
@@ -663,7 +694,6 @@ def get_latest_overlay(station: str = "KIWX") -> RadarOverlay:
             f"total {t_grid - t_start:.2f}s"
         )
 
-        volume_time = key.split("/")[-1]
         return RadarOverlay(
             products=products,
             available_products=available,
@@ -675,11 +705,76 @@ def get_latest_overlay(station: str = "KIWX") -> RadarOverlay:
             grid_fields=grid_fields,
             origin_lat=origin_lat,
             origin_lon=origin_lon,
+            available_tilts=available_tilts,
+            current_tilt_sweep=None,
         )
     except Exception as exc:  # noqa: BLE001
         fallback = _synthetic_demo(station)
         fallback.volume_time += f"  [live fetch failed: {exc.__class__.__name__}: {exc}]"
         return fallback
+
+
+def render_composite(station: str) -> RadarOverlay:
+    """Re-grid the full cached volume (all sweeps blended, the normal
+    default view) — same cached raw radar as render_tilt(), just without
+    extract_sweeps(). Lets switching back from a specific tilt to the
+    composite be just as instant as picking a tilt in the first place."""
+    cached = _RAW_RADAR_CACHE.get(station)
+    if cached is None:
+        raise RuntimeError(f"No cached volume for {station} — load it normally first")
+    radar = cached["radar"]
+
+    origin_lat = float(radar.latitude["data"][0])
+    origin_lon = float(radar.longitude["data"][0])
+    products, available, notes, coords, grid_fields = _grid_and_render(radar, origin_lat, origin_lon)
+
+    return RadarOverlay(
+        products=products,
+        available_products=available,
+        product_notes=notes,
+        coordinates=coords,
+        station=station,
+        volume_time=f"{cached['volume_time']} (composite)",
+        source="live",
+        grid_fields=grid_fields,
+        origin_lat=origin_lat,
+        origin_lon=origin_lon,
+        available_tilts=_available_tilts(radar),
+        current_tilt_sweep=None,
+    )
+
+
+def render_tilt(station: str, sweep: int) -> RadarOverlay:
+    """Re-grid a single elevation sweep from the already-cached raw radar
+    object for this station — no S3 fetch, just extracting one sweep and
+    running it through the same gridding pipeline. Raises RuntimeError if
+    nothing's cached for this station yet (e.g. it was never actually
+    loaded, only picked from the dropdown)."""
+    cached = _RAW_RADAR_CACHE.get(station)
+    if cached is None:
+        raise RuntimeError(f"No cached volume for {station} — load it normally first")
+    radar = cached["radar"]
+
+    single_sweep_radar = radar.extract_sweeps([sweep])
+    origin_lat = float(radar.latitude["data"][0])
+    origin_lon = float(radar.longitude["data"][0])
+    products, available, notes, coords, grid_fields = _grid_and_render(single_sweep_radar, origin_lat, origin_lon)
+    angle = float(single_sweep_radar.fixed_angle["data"][0])
+
+    return RadarOverlay(
+        products=products,
+        available_products=available,
+        product_notes=notes,
+        coordinates=coords,
+        station=station,
+        volume_time=f"{cached['volume_time']} ({angle:.1f}° tilt)",
+        source="live-tilt",
+        grid_fields=grid_fields,
+        origin_lat=origin_lat,
+        origin_lon=origin_lon,
+        available_tilts=_available_tilts(radar),
+        current_tilt_sweep=sweep,
+    )
 
 
 # ---------------------------------------------------------------------------
