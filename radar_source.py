@@ -222,8 +222,14 @@ def find_closest_stations(lat: float, lon: float, n: int = 3) -> list:
 REFLECTIVITY_FLOOR = 5.0       # dBZ, values below this are treated as clear air
 REFLECTIVITY_MAX = 75.0        # dBZ, colormap ceiling
 CORR_COEFF_MIN = 0.80          # threshold for dedicated correlation-coefficient overlay filtering
-GRID_RANGE_M = 230_000.0       # +/- range from radar, matches typical NEXRAD reflectivity range
-GRID_CELLS = 460               # ~1km pixels over 230km — finer than before, still light
+GRID_RANGE_M = 460_000.0       # +/- range from radar — full NEXRAD base reflectivity range (~248nm/459km), not the old 230km half-range
+GRID_CELLS = 460               # ~2km pixels over 460km — same cell count as before (230km @ 1km), so Barnes interpolation cost stays roughly flat despite doubled range
+# Confirmed against real storms (KIWX, v0.10.2): h_factor=4.0 fixed the short-range
+# issue and improved single-tilt rendering, but oversmoothed — spread reflectivity
+# into areas with no real return (visible over IL/WI/OH in testing). Settled on
+# 3.0 as a middle ground per side-by-side comparison against GR2Analyst. Revisit
+# if a "reduce smoothing" toggle gets built (see CHANGELOG open items).
+EXPERIMENTAL_H_FACTOR = 3.0
 SMOOTH_SIGMA = 0.0             # disabled smoothing to preserve intense core details
 
 
@@ -520,6 +526,12 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
         grid_shape=(1, GRID_CELLS, GRID_CELLS),
         grid_limits=((0, 1000), (-GRID_RANGE_M, GRID_RANGE_M), (-GRID_RANGE_M, GRID_RANGE_M)),
         fields=shared_field_names,
+        # Default dist_beam ROI (h_factor=1.0) is tuned for modest research-radar
+        # domains. Our single flat z=0 analysis layer is far below the true beam
+        # height at NEXRAD's long ranges (curvature + elevation angle), so the
+        # default ROI drops those gates entirely past a certain range. Widening
+        # h_factor lets far-range/high-beam gates still register at z=0.
+        roi_func="dist_beam", h_factor=EXPERIMENTAL_H_FACTOR, min_radius=1000.0,
     )
 
     cfg_refl = PRODUCTS["reflectivity"]
@@ -572,6 +584,7 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
             grid_shape=(1, GRID_CELLS, GRID_CELLS),
             grid_limits=((0, 1000), (-GRID_RANGE_M, GRID_RANGE_M), (-GRID_RANGE_M, GRID_RANGE_M)),
             fields=["cross_correlation_ratio"],
+            roi_func="dist_beam", h_factor=EXPERIMENTAL_H_FACTOR, min_radius=1000.0,
         )
         cfg_cc = PRODUCTS["correlation_coefficient"]
         cc_data = cc_grid.fields["cross_correlation_ratio"]["data"][0]

@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.10.1)
+# ontheball — web basemap prototype (v0.10.2)
 
 ![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 

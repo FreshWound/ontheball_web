@@ -2,6 +2,35 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.2 — real NEXRAD range, less short-range clipping
+
+- Grid range doubled: `GRID_RANGE_M` was 230km (~124nm), about half of NEXRAD's
+  actual base reflectivity range (~248nm/459km). Now 460km, with `GRID_CELLS`
+  left at 460 so pixel size grows (~1km → ~2km) rather than compute scaling up —
+  Barnes interpolation cost stays roughly flat.
+- Real short-range cause found and fixed: our grid is a single flat z-layer that
+  sits at z=0 (ground level) — confirmed via `numpy.linspace(0,1000,1) == [0.]`,
+  so the `(0,1000)` z-window barely mattered. A beam's actual height climbs with
+  range (elevation angle + earth curvature), so past a certain distance real
+  gates were too far above that z=0 layer for Py-ART's default `dist_beam` ROI
+  (`h_factor=1.0`) to still include them — they silently dropped out. This hit
+  single-tilt renders even harder than composite, since composite still had
+  low tilts filling gaps. Fixed by passing `roi_func="dist_beam"` explicitly
+  with a wider `h_factor` (settled on 3.0 after comparing 4.0/2.0 against real
+  KIWX storms side-by-side with GR2Analyst — 4.0 fixed range/tilt but visibly
+  oversmoothed, spreading reflectivity into areas with no real return) and
+  `min_radius=1000.0`, on both the shared reflectivity/velocity/ZDR grid pass
+  and the separate CC pass.
+- Known tradeoff from this fix: wider ROI blends in more, farther-away gates
+  per pixel, which can soften/smear real detail on nearby cells (observed on
+  a Kokomo-area cell under KIWX). Candidate follow-up: a toggle to reduce/
+  disable this smoothing for people who want closer-to-raw detail over
+  maximum range. Not yet built.
+- Also noted, not yet root-caused: a storm cell near Kokomo, IN wasn't showing
+  up even with both KIWX and KIND selected via multi-station shift-select.
+  Needs investigation — unclear yet whether it's related to the ROI change,
+  the multi-station blending logic, or something else.
+
 ## What's new in v0.10.1 — fix every station falling back to demo data
 
 - v0.10.0's tilt caching introduced a real bug: `volume_time` was being
