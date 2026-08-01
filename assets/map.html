@@ -494,6 +494,18 @@
         });
       }
 
+      // Selecting several stations means holding Shift while clicking each
+      // marker in turn. Rather than fetching after every single click
+      // (which stalls out if you click a second station while the first
+      // is still downloading), we wait for Shift to actually be released —
+      // signaling "done picking" — and fetch the whole batch of newly-
+      // added stations together at that point.
+      document.addEventListener('keyup', (e) => {
+        if (e.key === 'Shift' && window.bridge && window.bridge.reportShiftReleased) {
+          window.bridge.reportShiftReleased();
+        }
+      });
+
       function renderOverlayItems(items) {
         lastOverlayItems = items;
 

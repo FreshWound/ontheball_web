@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.9.1)
+# ontheball — web basemap prototype (v0.9.2)
 
 ![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 
@@ -84,6 +84,16 @@ to a specific one if a change ever needs rolling back. The `__version__`
 string in `ontheball_web.py` and the version in this title still get
 bumped each notable change, just as a quick human-readable marker
 alongside the commit history — not as the primary safety net anymore.
+
+## What's new in v0.9.2 — batch shift-click fetches on Shift release
+
+- Selecting several stations previously fetched after every single
+  shift-click, so clicking a second marker while the first was still
+  downloading got silently dropped (stuck on "still fetching"). Shift-click
+  now only toggles the selection and marker highlight immediately; the
+  actual fetch is deferred until Shift is released, so picking multiple
+  stations in one gesture batches into a single fetch of whatever's
+  missing instead of racing itself.
 
 ## What's new in v0.9.1 — fix shift-click not registering / stray zoom-in
 

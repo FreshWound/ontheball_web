@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -134,6 +134,7 @@ class Bridge(QObject):
     readyFromJs = pyqtSignal()                   # fired once JS side connects
     stationSelected = pyqtSignal(str)            # fired when a map marker is clicked
     stationShiftSelected = pyqtSignal(str)        # fired when a map marker is shift-clicked (toggle multi-select)
+    shiftReleased = pyqtSignal()                  # fired when the Shift key is released — time to fetch the batch
     selectedStationsChanged = pyqtSignal(str)     # JSON list of station codes, tells JS which markers to highlight
     basemapChanged = pyqtSignal(str)             # "light" | "dark"
     opacityChanged = pyqtSignal(int)             # 0-100
@@ -157,6 +158,10 @@ class Bridge(QObject):
     @pyqtSlot(str)
     def selectStationShift(self, code: str):
         self.stationShiftSelected.emit(str(code))
+
+    @pyqtSlot()
+    def reportShiftReleased(self):
+        self.shiftReleased.emit()
 
     @pyqtSlot(float, float)
     def reportCursorPosition(self, lat: float, lon: float):
@@ -331,6 +336,7 @@ class MainWindow(QMainWindow):
         self.bridge.readyFromJs.connect(self.on_js_ready)
         self.bridge.stationSelected.connect(self.on_station_selected_from_map)
         self.bridge.stationShiftSelected.connect(self.on_station_shift_selected)
+        self.bridge.shiftReleased.connect(self.on_shift_released)
         self.bridge.cursorMoved.connect(self.on_cursor_moved)
         self.bridge.homeLocationClicked.connect(self.on_home_location_clicked)
 
@@ -397,10 +403,11 @@ class MainWindow(QMainWindow):
             self.refresh_now()
 
     def on_station_shift_selected(self, code: str):
-        """Shift-click toggles a station in/out of a manual multi-station
-        selection. Only stations not already cached in the current frame
-        get fetched — building up a selection one click at a time doesn't
-        re-download stations you've already got."""
+        """Shift-click toggles a station in/out of the manual selection and
+        updates the marker highlight immediately, but doesn't fetch yet —
+        that happens once on_shift_released fires, so clicking several
+        markers in a row batches into one fetch instead of each click
+        racing the previous one's still-in-flight request."""
         if code in self.manual_stations:
             self.manual_stations.remove(code)
         else:
@@ -409,8 +416,16 @@ class MainWindow(QMainWindow):
         self.home_active_stations = None
         self.bridge.selectedStationsChanged.emit(json.dumps(self.manual_stations))
 
-        if not self.manual_stations:
+        if self.manual_stations:
+            self.status.showMessage(f"Selected {' + '.join(self.manual_stations)} — release Shift to load", 0)
+        else:
             self.status.showMessage("Selection cleared", 3000)
+
+    def on_shift_released(self):
+        """Fetch whatever's missing for the current manual selection, once
+        the whole shift-click gesture is done. Stations already cached in
+        the current frame are reused instantly with no fetch at all."""
+        if not self.manual_stations:
             return
 
         cached = {}
@@ -428,7 +443,10 @@ class MainWindow(QMainWindow):
             return
 
         if self.worker is not None and self.worker.isRunning():
-            self.status.showMessage("Still fetching — try again in a moment", 3000)
+            # A fetch is already in flight (e.g. auto-refresh landed at the
+            # same moment) — this batch will just get picked up next time
+            # Shift is released, rather than getting silently dropped.
+            self.status.showMessage("Still fetching — release Shift again once it finishes", 3000)
             return
 
         self._pending_manual_cached = cached
