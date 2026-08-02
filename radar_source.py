@@ -224,35 +224,44 @@ REFLECTIVITY_MAX = 75.0        # dBZ, colormap ceiling
 CORR_COEFF_MIN = 0.80          # threshold for dedicated correlation-coefficient overlay filtering
 GRID_RANGE_M = 460_000.0       # +/- range from radar — full NEXRAD base reflectivity range (~248nm/459km), not the old 230km half-range
 GRID_CELLS = 460               # ~2km pixels over 460km — same cell count as before (230km @ 1km), so Barnes interpolation cost stays roughly flat despite doubled range
-# Confirmed against real storms (KIWX, v0.10.2): a wide dist_beam ROI (h_factor=4.0)
-# fixed the short-range/tilt-dropout issue, but oversmoothed — confirmed via the
-# Kokomo comparison (real NWS data showed distinct storm cells; ours showed a
-# smeared blob with no cell structure at all). h_factor=3.0 is a bit better but
-# still visibly softer than GR2Analyst/NWS at the pixel level. Rather than pick
-# one fixed tradeoff, this is now a runtime toggle (see RANGE_H_FACTOR /
-# DETAIL_H_FACTOR + set_smoothing_mode below) — "Range" mode keeps far-range
-# coverage, "Detail" mode favors sharp, true-to-source structure over range.
-RANGE_H_FACTOR = 3.0           # favors far-range coverage (some smearing near-range)
-DETAIL_H_FACTOR = 1.0          # Py-ART's own default — favors sharp/accurate detail (shorter effective range)
-RANGE_MIN_RADIUS = 1000.0
-DETAIL_MIN_RADIUS = 250.0      # Py-ART's own default
+
+# Found via a direct KIND 0.9deg test 9mi from the radar (confirmed with real
+# storm structure right at the site per GR2Analyst): min_radius (250m Detail /
+# 1000m Range) was smaller than HALF the actual grid spacing (~2004m for
+# GRID_CELLS=460 over 920km). Py-ART's dist_beam ROI can legitimately find
+# zero gates within that small a radius around a grid point, even inside a
+# real storm — the point just comes back masked/empty. That's a real,
+# geometry-driven gap, not oversmoothing or undersmoothing, and it explains
+# scattered "black holes" seen in earlier screenshots plus real cells
+# disappearing at some tilts/ranges. Two changes:
+#  1. Range mode's min_radius bumped well above half its ~2004m spacing.
+#  2. Detail mode now grids its own smaller/tighter extent (own grid spacing
+#     ~652m over 300km) instead of sharing Range mode's coarse 2km spacing —
+#     matches its "prioritize accuracy over range" purpose, and lets it keep
+#     a small min_radius without reintroducing the same gap risk.
+RANGE_GRID_RANGE_M = GRID_RANGE_M   # 460km — same coverage as before
+DETAIL_GRID_RANGE_M = 150_000.0     # 150km — tighter, for Detail mode's own finer grid
+RANGE_H_FACTOR = 3.0            # favors far-range coverage (some smearing near-range)
+DETAIL_H_FACTOR = 1.0           # Py-ART's own default — favors sharp/accurate detail (shorter effective range)
+RANGE_MIN_RADIUS = 1300.0       # safely above half of ~2004m Range-mode spacing (1002m)
+DETAIL_MIN_RADIUS = 500.0       # safely above half of ~652m Detail-mode spacing (326m)
 _detail_mode = False           # current UI toggle state; flipped via set_smoothing_mode()
 
 
 def set_smoothing_mode(detail_mode: bool):
     """Called from the UI toggle. True = prioritize sharp/accurate detail
-    (shorter effective range); False = prioritize far-range coverage (some
-    smearing of isolated cells). Takes effect on the next grid/render call —
-    does not require a fresh S3 fetch, just a re-render from the cached raw
-    radar object."""
+    (shorter effective range, its own tighter grid); False = prioritize
+    far-range coverage (some smearing of isolated cells). Takes effect on
+    the next grid/render call — does not require a fresh S3 fetch, just a
+    re-render from the cached raw radar object."""
     global _detail_mode
     _detail_mode = bool(detail_mode)
 
 
 def _current_roi_params():
     if _detail_mode:
-        return DETAIL_H_FACTOR, DETAIL_MIN_RADIUS
-    return RANGE_H_FACTOR, RANGE_MIN_RADIUS
+        return DETAIL_H_FACTOR, DETAIL_MIN_RADIUS, DETAIL_GRID_RANGE_M
+    return RANGE_H_FACTOR, RANGE_MIN_RADIUS, RANGE_GRID_RANGE_M
 
 
 SMOOTH_SIGMA = 0.0             # disabled smoothing to preserve intense core details
@@ -376,6 +385,7 @@ class RadarOverlay:
     origin_lon: float = None
     available_tilts: list = None   # [{"sweep": int, "angle": float}, ...] for this volume, low-to-high; None if unknown
     current_tilt_sweep: int = None  # which sweep index this overlay was actually gridded from (0 = default composite)
+    grid_range_m: float = None      # +/- range this overlay was actually gridded at (Detail vs Range mode differ) — sample_value must use this, not a global constant
 
 
 def sample_value(overlay: "RadarOverlay", product_key: str, lat: float, lon: float):
@@ -397,6 +407,7 @@ def sample_value(overlay: "RadarOverlay", product_key: str, lat: float, lon: flo
 
     data = overlay.grid_fields[product_key]
     n = data.shape[0]  # square grid, GRID_CELLS x GRID_CELLS
+    half_extent = overlay.grid_range_m if overlay.grid_range_m else GRID_RANGE_M
 
     transformer = Transformer.from_crs(
         "EPSG:4326",
@@ -404,12 +415,12 @@ def sample_value(overlay: "RadarOverlay", product_key: str, lat: float, lon: flo
         always_xy=True,
     )
     x, y = transformer.transform(lon, lat)
-    if abs(x) > GRID_RANGE_M or abs(y) > GRID_RANGE_M:
+    if abs(x) > half_extent or abs(y) > half_extent:
         return None
 
     # row 0 = south (matches the origin='lower' PNG export convention used elsewhere)
-    col = int(round((x + GRID_RANGE_M) / (2 * GRID_RANGE_M) * (n - 1)))
-    row = int(round((y + GRID_RANGE_M) / (2 * GRID_RANGE_M) * (n - 1)))
+    col = int(round((x + half_extent) / (2 * half_extent) * (n - 1)))
+    row = int(round((y + half_extent) / (2 * half_extent) * (n - 1)))
     col = max(0, min(n - 1, col))
     row = max(0, min(n - 1, row))
 
@@ -500,7 +511,7 @@ def _field_to_png_base64(field: np.ndarray, vmin: float, vmax: float, cmap, tran
 
 
 def _grid_and_render(radar, origin_lat: float, origin_lon: float):
-    h_factor, min_radius = _current_roi_params()
+    h_factor, min_radius, grid_range_m = _current_roi_params()
 
     # Reflectivity, Velocity, and ZDR all share identical gate criteria (just
     # the reflectivity floor), so they're gridded together in a single
@@ -551,7 +562,7 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
     shared_grid = pyart.map.grid_from_radars(
         (radar,), gatefilters=(shared_gf,),
         grid_shape=(1, GRID_CELLS, GRID_CELLS),
-        grid_limits=((0, 1000), (-GRID_RANGE_M, GRID_RANGE_M), (-GRID_RANGE_M, GRID_RANGE_M)),
+        grid_limits=((0, 1000), (-grid_range_m, grid_range_m), (-grid_range_m, grid_range_m)),
         fields=shared_field_names,
         # Default dist_beam ROI (h_factor=1.0) is tuned for modest research-radar
         # domains. Our single flat z=0 analysis layer is far below the true beam
@@ -609,7 +620,7 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
         cc_grid = pyart.map.grid_from_radars(
             (radar,), gatefilters=(cc_gf,),
             grid_shape=(1, GRID_CELLS, GRID_CELLS),
-            grid_limits=((0, 1000), (-GRID_RANGE_M, GRID_RANGE_M), (-GRID_RANGE_M, GRID_RANGE_M)),
+            grid_limits=((0, 1000), (-grid_range_m, grid_range_m), (-grid_range_m, grid_range_m)),
             fields=["cross_correlation_ratio"],
             roi_func="dist_beam", h_factor=h_factor, min_radius=min_radius,
         )
@@ -628,8 +639,8 @@ def _grid_and_render(radar, origin_lat: float, origin_lon: float):
     else:
         notes["correlation_coefficient"] = "not present in this volume"
 
-    coords = _corners_latlon(origin_lat, origin_lon, GRID_RANGE_M)
-    return products, available, notes, coords, grid_fields
+    coords = _corners_latlon(origin_lat, origin_lon, grid_range_m)
+    return products, available, notes, coords, grid_fields, grid_range_m
 
 
 def _synthetic_demo(station: str) -> RadarOverlay:
@@ -678,6 +689,7 @@ def _synthetic_demo(station: str) -> RadarOverlay:
         grid_fields=grid_fields,
         origin_lat=meta["lat"],
         origin_lon=meta["lon"],
+        grid_range_m=GRID_RANGE_M,
     )
 
 
@@ -718,7 +730,7 @@ def get_latest_overlay(station: str = "KIWX") -> RadarOverlay:
 
         origin_lat = float(radar.latitude["data"][0])
         origin_lon = float(radar.longitude["data"][0])
-        products, available, notes, coords, grid_fields = _grid_and_render(radar, origin_lat, origin_lon)
+        products, available, notes, coords, grid_fields, grid_range_m = _grid_and_render(radar, origin_lat, origin_lon)
         t_grid = time.perf_counter()
 
         volume_time = key.split("/")[-1]
@@ -747,6 +759,7 @@ def get_latest_overlay(station: str = "KIWX") -> RadarOverlay:
             origin_lon=origin_lon,
             available_tilts=available_tilts,
             current_tilt_sweep=None,
+            grid_range_m=grid_range_m,
         )
     except Exception as exc:  # noqa: BLE001
         fallback = _synthetic_demo(station)
@@ -766,7 +779,7 @@ def render_composite(station: str) -> RadarOverlay:
 
     origin_lat = float(radar.latitude["data"][0])
     origin_lon = float(radar.longitude["data"][0])
-    products, available, notes, coords, grid_fields = _grid_and_render(radar, origin_lat, origin_lon)
+    products, available, notes, coords, grid_fields, grid_range_m = _grid_and_render(radar, origin_lat, origin_lon)
 
     return RadarOverlay(
         products=products,
@@ -781,6 +794,7 @@ def render_composite(station: str) -> RadarOverlay:
         origin_lon=origin_lon,
         available_tilts=_available_tilts(radar),
         current_tilt_sweep=None,
+        grid_range_m=grid_range_m,
     )
 
 
@@ -811,7 +825,7 @@ def render_tilt(station: str, sweep: int) -> RadarOverlay:
     single_sweep_radar = radar.extract_sweeps(matching_sweeps)
     origin_lat = float(radar.latitude["data"][0])
     origin_lon = float(radar.longitude["data"][0])
-    products, available, notes, coords, grid_fields = _grid_and_render(single_sweep_radar, origin_lat, origin_lon)
+    products, available, notes, coords, grid_fields, grid_range_m = _grid_and_render(single_sweep_radar, origin_lat, origin_lon)
 
     return RadarOverlay(
         products=products,
@@ -826,6 +840,7 @@ def render_tilt(station: str, sweep: int) -> RadarOverlay:
         origin_lon=origin_lon,
         available_tilts=_available_tilts(radar),
         current_tilt_sweep=sweep,
+        grid_range_m=grid_range_m,
     )
 
 

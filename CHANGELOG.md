@@ -2,6 +2,47 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.5 — real gridding-gap bug found (min_radius vs grid spacing)
+
+- Root cause found for a serious one: KIND 0.9° tilt showed literally nothing
+  9 miles from the radar, at a spot GR2Analyst confirmed had a real, intense
+  storm (60+ dbz, imaged all the way up through its vertical profile). Math
+  check: `GRID_CELLS=460` over the 920km-wide grid gives ~2004m spacing
+  between grid points, but `min_radius` (250m Detail / 1000m Range) was
+  smaller than *half* that spacing in both modes. Py-ART's `dist_beam` ROI
+  can legitimately find zero gates within that small a search radius around
+  a grid point — even sitting inside a real storm — and that grid point just
+  comes back masked/empty. This is a geometry-driven gap, distinct from both
+  the earlier range-clipping bug and the oversmoothing tradeoff; it likely
+  explains the scattered black-hole/checkerboard patches seen in several
+  earlier screenshots too.
+- Fix: Range mode's `min_radius` bumped to 1300 (safely above its ~1002m
+  half-spacing). Detail mode now grids its own smaller, tighter extent
+  (150km instead of sharing Range mode's 460km) — matches its "prioritize
+  accuracy over range" purpose, gives it ~654m spacing, and lets its
+  `min_radius` (500) clear that safely too, without needing a big radius
+  that would undercut the whole point of Detail mode.
+- This required `RadarOverlay` to record which `grid_range_m` it was
+  actually gridded at (`sample_value` was reading a single global constant
+  before — harmless while both modes shared one range, but would have been
+  a real bug the moment they diverged). Verified with a round-trip test:
+  pick a known grid cell, convert to lat/lon, convert back, confirm it lands
+  on the same cell, for both 150km and 460km grids.
+- Added a debug print on hover (station, product, lat/lon, value,
+  grid_range_m, detail_mode) so a future mismatch report comes with real
+  diagnostic data instead of a screenshot to reverse-engineer from. Gated
+  behind a new "Debug hover" checkbox (off by default) — mouse movement
+  fires constantly, so this only prints while explicitly turned on right
+  before reproducing an issue, then off again.
+- Not resolved: the specific "cursor on a solid orange block, legend reads
+  10.28 dBZ" mismatch from the 3:45 PM KIND screenshot. Traced the full
+  pipeline for it — same array feeds both the PNG and the hover-lookup (so
+  it's not a stale-data split), and a round-trip georeferencing test showed
+  the row/col math is internally self-consistent — so this specific report
+  is not yet explained by anything found in this pass. Worth revisiting
+  once the hover debug print is in place; if it turns up on the next
+  session it should print a very telling row/col/value combination.
+
 ## What's new in v0.10.4 — likely fix for the shading/legend mismatch
 
 - Found a real cause for the "cursor visually on orange, legend reads a blue

@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.4"
+__version__ = "0.10.5"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -279,6 +279,16 @@ class MainWindow(QMainWindow):
         )
         self.detail_mode_checkbox.toggled.connect(self.on_detail_mode_toggled)
         controls.addWidget(self.detail_mode_checkbox)
+
+        controls.addWidget(QLabel("Debug hover:"))
+        self.debug_hover_checkbox = QCheckBox()
+        self.debug_hover_checkbox.setToolTip(
+            "Off (default): no terminal output on mouse movement.\n"
+            "On: prints station/product/lat/lon/value/grid mode to the "
+            "terminal on every hover-sample — turn on right before "
+            "reproducing a value/legend mismatch, off when done."
+        )
+        controls.addWidget(self.debug_hover_checkbox)
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -617,14 +627,22 @@ class MainWindow(QMainWindow):
         cfg = radar_source.PRODUCTS[product]
 
         value = None
+        used_overlay = None
         for overlay in overlays:
             value = radar_source.sample_value(overlay, product, lat, lon)
             if value is not None:
+                used_overlay = overlay
                 break
 
         if value is None:
             self.bridge.hoverValueReady.emit(json.dumps({"value": None}))
             return
+
+        if self.debug_hover_checkbox.isChecked():
+            print(f"[hover] station={used_overlay.station} product={product} "
+                  f"lat={lat:.4f} lon={lon:.4f} value={value:.2f} "
+                  f"grid_range_m={used_overlay.grid_range_m} "
+                  f"detail_mode={radar_source._detail_mode}")
 
         vmin, vmax = cfg["vmin"], cfg["vmax"]
         pct = max(0.0, min(100.0, (value - vmin) / (vmax - vmin) * 100.0))
