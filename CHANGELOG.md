@@ -2,6 +2,37 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.7 — auto-refresh now backfills a bit of history
+
+- Turning on Auto-refresh now also pulls the ~5 volumes just before the
+  current one for the active station (single-station view only — Home/
+  multi-select doesn't try this, same restriction as Tilt), so the
+  playback slider starts with real context instead of a single frame you
+  have to wait several refresh cycles to build up.
+- No new backend/service needed: `_latest_key()` was already listing every
+  volume key for the station/day just to take the last one — the prior
+  volumes were sitting unused in that same S3 listing. `get_recent_overlays()`
+  reuses that listing (`_list_keys_for_station()`) and downloads/grids the
+  handful before the latest via a small thread pool, same pattern as the
+  Home multi-station fetch.
+- One-time pull per auto-refresh-on toggle, not per refresh cycle. Dedupes
+  against whatever's already in session history (by volume_time) so
+  toggling it on and off doesn't stack duplicate frames, and drops the
+  result if the station changed while the fetch was in flight.
+
+## What's new in v0.10.6 — product/playback hotkeys
+
+- `1`-`4` or `B`/`V`/`C`/`Z` jump straight to a product (Reflectivity/Base
+  Velocity/Correlation Coefficient/ZDR); Left/Right arrows step playback
+  one frame at a time (pauses auto-play first if it's running, clamps at
+  either end rather than wrapping).
+- Handled on the JS side (`assets/map.html`) since that's where keyboard
+  focus actually lives, relayed to Python over the existing QWebChannel
+  bridge pattern. Had to disable MapLibre's built-in keyboard pan
+  (`map.keyboard.disable()`) since its arrow-key handler is attached to the
+  map container and fires before a document-level listener ever sees the
+  event — same reasoning as the earlier `boxZoom.disable()` fix.
+
 ## What's new in v0.10.5 — real gridding-gap bug found (min_radius vs grid spacing)
 
 - Root cause found for a serious one: KIND 0.9° tilt showed literally nothing

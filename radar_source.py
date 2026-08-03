@@ -16,6 +16,7 @@ import json
 import tempfile
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import asin, cos, radians, sin, sqrt
@@ -467,6 +468,24 @@ def _latest_key(station: str):
     return None
 
 
+def _list_keys_for_station(station: str) -> list:
+    """Every volume key for `station` across today + yesterday (UTC),
+    chronological oldest-to-newest. Same day-rollover handling as
+    _latest_key, but keeps the whole list instead of just the last entry —
+    used for history backfill, where the older volumes we want are already
+    sitting in this same listing."""
+    s3 = _s3_client()
+    now = datetime.now(timezone.utc)
+    all_keys = []
+    for day_offset in (1, 0):  # yesterday first so the combined list stays chronological
+        day = now if day_offset == 0 else now.fromtimestamp(now.timestamp() - 86400, tz=timezone.utc)
+        prefix = f"{day.year:04d}/{day.month:02d}/{day.day:02d}/{station}/"
+        resp = s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix)
+        contents = resp.get("Contents", [])
+        all_keys.extend(sorted(o["Key"] for o in contents if not o["Key"].endswith("_MDM")))
+    return all_keys
+
+
 def _corners_latlon(origin_lat: float, origin_lon: float, half_extent_m: float):
     transformer = Transformer.from_crs(
         {"proj": "aeqd", "lat_0": origin_lat, "lon_0": origin_lon, "datum": "WGS84"},
@@ -765,6 +784,74 @@ def get_latest_overlay(station: str = "KIWX") -> RadarOverlay:
         fallback = _synthetic_demo(station)
         fallback.volume_time += f"  [live fetch failed: {exc.__class__.__name__}: {exc}]"
         return fallback
+
+
+def _overlay_from_key(station: str, key: str) -> RadarOverlay:
+    """Download + grid a single already-known S3 key into a RadarOverlay.
+    Shares the download/parse/grid steps of get_latest_overlay(), but skips
+    the key-lookup — used for history backfill, where the caller already
+    has a list of keys from one _list_keys_for_station() call."""
+    s3 = _s3_client()
+    with tempfile.NamedTemporaryFile(suffix=".ar2v") as tmp:
+        s3.download_fileobj(BUCKET, key, tmp)
+        tmp.flush()
+        radar = pyart.io.read_nexrad_archive(tmp.name)
+
+    origin_lat = float(radar.latitude["data"][0])
+    origin_lon = float(radar.longitude["data"][0])
+    products, available, notes, coords, grid_fields, grid_range_m = _grid_and_render(radar, origin_lat, origin_lon)
+    volume_time = key.split("/")[-1]
+    available_tilts = _available_tilts(radar)
+
+    return RadarOverlay(
+        products=products,
+        available_products=available,
+        product_notes=notes,
+        coordinates=coords,
+        station=station,
+        volume_time=volume_time,
+        source="live",
+        grid_fields=grid_fields,
+        origin_lat=origin_lat,
+        origin_lon=origin_lon,
+        available_tilts=available_tilts,
+        current_tilt_sweep=None,
+        grid_range_m=grid_range_m,
+    )
+
+
+def get_recent_overlays(station: str, count: int = 5) -> list:
+    """The `count` volumes just before the current one for `station`,
+    oldest to newest — for backfilling playback history on demand (e.g.
+    when auto-refresh is turned on) without needing a standing background
+    service. Reuses one S3 listing (_list_keys_for_station) rather than a
+    fresh list_objects_v2 call per volume. Best-effort: a single
+    unreadable/corrupt volume in the batch is skipped rather than failing
+    the whole backfill."""
+    if station not in STATIONS:
+        raise ValueError(f"Unknown station {station!r}; choices are {list(STATIONS)}")
+
+    keys = _list_keys_for_station(station)
+    if len(keys) < 2:
+        return []
+    # Exclude the very latest key — that volume is already loaded separately
+    # by get_latest_overlay(); we only want the ones before it.
+    backfill_keys = keys[-(count + 1):-1]
+    if not backfill_keys:
+        return []
+
+    results = {}
+    max_workers = min(len(backfill_keys), 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_key = {pool.submit(_overlay_from_key, station, k): k for k in backfill_keys}
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                results[key] = future.result()
+            except Exception:  # noqa: BLE001
+                continue
+
+    return [results[k] for k in backfill_keys if k in results]
 
 
 def render_composite(station: str) -> RadarOverlay:

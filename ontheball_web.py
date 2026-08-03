@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.6"
+__version__ = "0.10.7"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -44,6 +44,7 @@ PRODUCT_HOTKEYS = {       # lowercased JS e.key -> radar_source.PRODUCTS key
 }
 
 MAX_HISTORY = 12          # cap on cached in-session frames
+HISTORY_BACKFILL_COUNT = 5  # volumes pulled once when auto-refresh is turned on
 PLAYBACK_FRAME_MS = 600   # time each frame stays on screen during playback
 HOME_STATION_COUNT = 3    # how many closest stations to load when Home Location is set
 DEFAULT_REFRESH_INTERVAL_SEC = 300   # used until we've measured a station's actual cadence
@@ -121,6 +122,25 @@ class MultiRadarFetchWorker(QThread):
             self.finished_err.emit(" | ".join(errors))
 
 
+class HistoryBackfillWorker(QThread):
+    """Fetches a handful of volumes just before the current one for a single
+    station — used when auto-refresh is turned on, so playback has some
+    real context to scrub through instead of starting from a single frame."""
+    finished_ok = pyqtSignal(str, list)   # station, list[RadarOverlay] oldest->newest
+
+    def __init__(self, station: str, count: int):
+        super().__init__()
+        self.station = station
+        self.count = count
+
+    def run(self):
+        try:
+            overlays = radar_source.get_recent_overlays(self.station, self.count)
+        except Exception:  # noqa: BLE001
+            overlays = []
+        self.finished_ok.emit(self.station, overlays)
+
+
 class WarningsFetchWorker(QThread):
     finished_ok = pyqtSignal(dict)
 
@@ -195,6 +215,7 @@ class MainWindow(QMainWindow):
         self.bridge = Bridge()
         self.worker = None
         self.warnings_worker = None
+        self.history_backfill_worker = None
 
         # Home location: entered fresh each session, never persisted to disk.
         # When set, self.home_active_stations overrides whatever's picked in
@@ -520,8 +541,54 @@ class MainWindow(QMainWindow):
     def on_auto_refresh_toggled(self, checked: bool):
         if checked:
             self.auto_timer.start(self.auto_refresh_interval_sec * 1000)
+            self._start_history_backfill()
         else:
             self.auto_timer.stop()
+
+    def _start_history_backfill(self):
+        """One-time pull of a few recent volumes when auto-refresh is turned
+        on — single-station live view only (mirrors the Tilt dropdown's
+        restriction): Home/multi-select would mean backfilling several
+        stations at once for one shared slider, which doesn't map cleanly."""
+        if self.manual_stations or self.home_active_stations:
+            return
+        if self.history_backfill_worker is not None and self.history_backfill_worker.isRunning():
+            return
+        station = self.current_station()
+        self.status.showMessage(f"pulling recent history for {station}…")
+        self.history_backfill_worker = HistoryBackfillWorker(station, HISTORY_BACKFILL_COUNT)
+        self.history_backfill_worker.finished_ok.connect(self.on_history_backfill_ready)
+        self.history_backfill_worker.start()
+
+    def on_history_backfill_ready(self, station: str, overlays: list):
+        # Guard against the station changing or multi-select being armed
+        # while the backfill was in flight — stale results just get dropped.
+        if not overlays or self.manual_stations or self.home_active_stations:
+            return
+        if self.current_station() != station:
+            return
+
+        existing_times = {frame[0].volume_time for frame in self.history if len(frame) == 1}
+        new_frames = [[ov] for ov in overlays if ov.volume_time not in existing_times]
+        if not new_frames:
+            return
+
+        was_at_live = (self.history_index == -1) or (self.history_index == len(self.history) - 1)
+        self.history = (new_frames + self.history)[-MAX_HISTORY:]
+
+        self.history_slider.blockSignals(True)
+        self.history_slider.setRange(0, len(self.history) - 1)
+        self.history_slider.setEnabled(len(self.history) > 1)
+        self.play_btn.setEnabled(len(self.history) > 1)
+        if was_at_live:
+            self.history_index = len(self.history) - 1
+        else:
+            self.history_index = min(self.history_index + len(new_frames), len(self.history) - 1)
+        self.history_slider.setValue(self.history_index)
+        self.history_slider.blockSignals(False)
+        self._display_current_frame()
+
+        self.status.showMessage(f"loaded {len(new_frames)} recent frame(s) for {station}", 4000)
 
     def on_detail_mode_toggled(self, checked: bool):
         radar_source.set_smoothing_mode(checked)
