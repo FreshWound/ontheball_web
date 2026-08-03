@@ -2,6 +2,21 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.8 — auto-refresh backfill on station change, frame time badge
+
+- Fixed: switching stations while Auto-refresh was already checked didn't
+  pull history — backfill only fired on the checkbox's on-toggle, not on
+  a station change. Now every station-change path (dropdown, map-marker
+  click including the cached-overlay shortcut) checks the checkbox itself
+  and backfills if it's on, instead of requiring an off/on toggle to
+  re-trigger it.
+- Added a frame-time badge (top-right, next to Home Location) showing
+  either "🔴 LIVE — HH:MM UTC" or, when scrubbing history, the frame's
+  scan time plus the gap to the previous step ("Δ +6 min vs previous
+  step") — NEXRAD's actual volume cadence isn't perfectly even, so this
+  makes the real time-per-step visible instead of just an ordinal frame
+  count.
+
 ## What's new in v0.10.7 — auto-refresh now backfills a bit of history
 
 - Turning on Auto-refresh now also pulls the ~5 volumes just before the

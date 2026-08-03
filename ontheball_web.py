@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.7"
+__version__ = "0.10.8"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -354,6 +354,10 @@ class MainWindow(QMainWindow):
         self.home_status_label = QLabel("Home not set — type lat/lon, or leave both blank and click Set Home to pick a spot on the map")
         home_controls.addWidget(self.home_status_label)
         home_controls.addStretch(1)
+
+        self.frame_time_label = QLabel("")
+        self.frame_time_label.setStyleSheet("font-weight: 600;")
+        home_controls.addWidget(self.frame_time_label)
         layout.addLayout(home_controls)
 
         history_controls = QHBoxLayout()
@@ -461,9 +465,11 @@ class MainWindow(QMainWindow):
             self.status.showMessage(
                 f"{code} — showing already-loaded data (click Refresh now for the newest volume)", 5000
             )
+            self._maybe_backfill_on_station_change()
         else:
             self.reset_history()
             self.refresh_now()
+            self._maybe_backfill_on_station_change()
 
     def on_station_shift_selected(self, code: str):
         """Shift-click toggles a station in/out of the manual selection and
@@ -545,6 +551,14 @@ class MainWindow(QMainWindow):
         else:
             self.auto_timer.stop()
 
+    def _maybe_backfill_on_station_change(self):
+        """Auto-refresh's history backfill only fires when the checkbox is
+        actually toggled on — switching stations while it's already checked
+        used to leave you with a single fresh frame until you flipped it off
+        and back on. Call this from every station-change path instead."""
+        if self.auto_refresh_checkbox.isChecked():
+            self._start_history_backfill()
+
     def _start_history_backfill(self):
         """One-time pull of a few recent volumes when auto-refresh is turned
         on — single-station live view only (mirrors the Tilt dropdown's
@@ -612,6 +626,7 @@ class MainWindow(QMainWindow):
             self.bridge.selectedStationsChanged.emit(json.dumps([]))
         self.reset_history()
         self.refresh_now()
+        self._maybe_backfill_on_station_change()
 
     def on_set_home_clicked(self):
         lat_text = self.home_lat_input.text().strip()
@@ -743,6 +758,7 @@ class MainWindow(QMainWindow):
         self.history_slider.setEnabled(False)
         self.history_slider.blockSignals(False)
         self.history_label.setText("no frames yet")
+        self.frame_time_label.setText("")
 
     def on_product_changed(self, _index: int):
         self._display_current_frame()
@@ -887,8 +903,38 @@ class MainWindow(QMainWindow):
         frame_tag = "live" if is_live else f"frame {idx + 1}/{len(self.history)}"
         time_str = " / ".join([ov.volume_time for ov in overlays])
         self.history_label.setText(f"{frame_tag} — {time_str}")
+        self.frame_time_label.setText(self._format_frame_time_badge(idx))
         self._sync_tilt_dropdown(overlays)
         self._emit_overlays(overlays)
+
+    def _format_frame_time_badge(self, idx: int) -> str:
+        """LIVE tag or scan time for the frame at `idx`, plus — for a history
+        frame — the gap to the previous step, so scrubbing/playback makes
+        the actual (often irregular) volume cadence visible rather than
+        just an ordinal frame count."""
+        overlays = self.history[idx]
+        is_live = idx == len(self.history) - 1
+        dt = _parse_volume_datetime(overlays[0].volume_time) if overlays else None
+
+        if dt is None:
+            self.frame_time_label.setStyleSheet("font-weight: 600;")
+            return "🔴 LIVE" if is_live else f"frame {idx + 1}/{len(self.history)}"
+
+        time_str = dt.strftime("%H:%M UTC")
+
+        if is_live:
+            self.frame_time_label.setStyleSheet("font-weight: 600; color: #e04040;")
+            return f"🔴 LIVE — {time_str}"
+
+        self.frame_time_label.setStyleSheet("font-weight: 600;")
+        prev_dt = None
+        if idx > 0 and self.history[idx - 1]:
+            prev_dt = _parse_volume_datetime(self.history[idx - 1][0].volume_time)
+        if prev_dt is not None:
+            delta_min = round((dt - prev_dt).total_seconds() / 60)
+            sign = "+" if delta_min >= 0 else ""
+            return f"⏱ {time_str}  (Δ {sign}{delta_min} min vs previous step)"
+        return f"⏱ {time_str}"
 
     def _sync_tilt_dropdown(self, overlays: list):
         """Tilt selection only makes sense for a single displayed station —
