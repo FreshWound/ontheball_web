@@ -269,6 +269,14 @@
     // feature this app otherwise uses, so just disable it outright.
     map.boxZoom.disable();
 
+    // Left/Right arrows are our playback-step hotkeys (relayed to Python
+    // below); MapLibre's own keyboard handler also binds arrows to pan
+    // the map, and since it's attached to the map container it fires
+    // before our document-level listener ever sees the event. Not a
+    // gesture this app otherwise relies on, so disable it outright —
+    // same reasoning as boxZoom above.
+    map.keyboard.disable();
+
     map.addControl(new maplibregl.NavigationControl());
 
     function prioritizePlaceLabels() {
@@ -503,6 +511,23 @@
       document.addEventListener('keyup', (e) => {
         if (e.key === 'Shift' && window.bridge && window.bridge.reportShiftReleased) {
           window.bridge.reportShiftReleased();
+        }
+      });
+
+      // Hotkeys: 1/2/3/4 or B/V/C/Z jump straight to a product
+      // (Reflectivity/Base Velocity/Correlation Coefficient/ZDR), Left/Right
+      // arrows step playback one frame at a time. Relayed to Python, which
+      // owns the actual product-combo/history-slider state.
+      const HOTKEYS = new Set([
+        '1', '2', '3', '4',
+        'b', 'B', 'v', 'V', 'c', 'C', 'z', 'Z',
+        'ArrowLeft', 'ArrowRight',
+      ]);
+      document.addEventListener('keydown', (e) => {
+        if (!HOTKEYS.has(e.key)) return;
+        e.preventDefault();
+        if (window.bridge && window.bridge.reportHotkey) {
+          window.bridge.reportHotkey(e.key);
         }
       });
 

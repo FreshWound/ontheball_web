@@ -30,11 +30,18 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.5"
+__version__ = "0.10.6"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
 HTTP_PORT = 8765
+
+PRODUCT_HOTKEYS = {       # lowercased JS e.key -> radar_source.PRODUCTS key
+    "1": "reflectivity", "b": "reflectivity",
+    "2": "velocity", "v": "velocity",
+    "3": "correlation_coefficient", "c": "correlation_coefficient",
+    "4": "differential_reflectivity", "z": "differential_reflectivity",
+}
 
 MAX_HISTORY = 12          # cap on cached in-session frames
 PLAYBACK_FRAME_MS = 600   # time each frame stays on screen during playback
@@ -146,6 +153,7 @@ class Bridge(QObject):
     homeMarkerCleared = pyqtSignal()             # fired when Clear Home is clicked
     armHomeSelection = pyqtSignal(bool)          # True = enter "click the map to set home" mode, False = cancel
     homeLocationClicked = pyqtSignal(float, float)  # fired when the map is clicked while armed
+    hotkeyPressed = pyqtSignal(str)              # raw JS e.key value for a hotkey we care about
 
     @pyqtSlot()
     def jsReady(self):
@@ -170,6 +178,10 @@ class Bridge(QObject):
     @pyqtSlot(float, float)
     def reportHomeLocationClick(self, lat: float, lon: float):
         self.homeLocationClicked.emit(lat, lon)
+
+    @pyqtSlot(str)
+    def reportHotkey(self, key: str):
+        self.hotkeyPressed.emit(str(key))
 
 
 class MainWindow(QMainWindow):
@@ -368,6 +380,7 @@ class MainWindow(QMainWindow):
         self.bridge.shiftReleased.connect(self.on_shift_released)
         self.bridge.cursorMoved.connect(self.on_cursor_moved)
         self.bridge.homeLocationClicked.connect(self.on_home_location_clicked)
+        self.bridge.hotkeyPressed.connect(self.on_hotkey)
 
         self._home_selection_armed = False
 
@@ -770,6 +783,33 @@ class MainWindow(QMainWindow):
         self.history_slider.setValue(self.history_index)
         self.history_slider.blockSignals(False)
         self._display_current_frame()
+
+    def step_history(self, delta: int):
+        """Move one frame forward/back (arrow-key hotkeys). Stops at either
+        end rather than wrapping, unlike auto-play — manual stepping past
+        the last frame shouldn't silently jump back to the first."""
+        if self.play_timer.isActive():
+            self.play_timer.stop()
+            self.play_btn.setText("▶ Play")
+        if not self.history_slider.isEnabled() or len(self.history) < 2:
+            return
+        new_index = max(0, min(self.history_index + delta, len(self.history) - 1))
+        self.history_slider.setValue(new_index)
+
+    def on_hotkey(self, key: str):
+        """Handle hotkeys relayed from the map page: 1-4/BR-BV-CC-ZDR to
+        jump product, Left/Right arrows to step playback one frame."""
+        if key == "ArrowLeft":
+            self.step_history(-1)
+            return
+        if key == "ArrowRight":
+            self.step_history(1)
+            return
+        product_key = PRODUCT_HOTKEYS.get(key.lower())
+        if product_key is not None:
+            idx = self.product_combo.findData(product_key)
+            if idx >= 0:
+                self.product_combo.setCurrentIndex(idx)
 
     def _display_current_frame(self):
         if not self.history:
