@@ -2,6 +2,23 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.10 — history-backfill dedup was silently swallowing valid re-toggles
+
+- Fixed: switching Tilt to a specific angle and back to Composite, then
+  re-toggling Auto-refresh to try to backfill history again, appeared to
+  do nothing — only changing station would "fix" it. Two things
+  compounded: (1) `render_composite()`/`render_tilt()` tag whichever frame
+  you're viewing with a cosmetic `" (composite)"`/`" (X.X° tilt)"` suffix
+  for the label, which `on_history_backfill_ready()`'s dedup was
+  comparing literally instead of against the real volume identity; (2) a
+  successful backfill that legitimately finds nothing new (because no new
+  NEXRAD volume has landed on S3 yet — scans are ~5-10 min apart) returned
+  completely silently, indistinguishable from an actual failure.
+- Added `_base_volume_time()` to strip that display suffix before
+  comparing, and status-bar messages for both "came back empty" and
+  "already have the recent volumes, nothing new yet" so a no-op backfill
+  reads as a no-op instead of looking broken.
+
 ## What's new in v0.10.9 — smarter defaults, nationwide alerts on startup
 
 - Auto-refresh and Reduce smoothing now default to **on** instead of off.

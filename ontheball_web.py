@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.9"
+__version__ = "0.10.10"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -69,6 +69,15 @@ def _parse_volume_datetime(volume_time: str):
         return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def _base_volume_time(volume_time: str) -> str:
+    """Strip the cosmetic ' (composite)'/' (X.X° tilt)' suffix render_composite()/
+    render_tilt() add for display, so history-dedup compares the underlying
+    volume identity (e.g. 'KAMX20260803_185144_V06') rather than whatever
+    label the currently-viewed frame happens to be wearing."""
+    idx = volume_time.find(" (")
+    return volume_time[:idx] if idx != -1 else volume_time
 
 
 def start_local_server(directory: Path, port: int):
@@ -607,14 +616,23 @@ class MainWindow(QMainWindow):
     def on_history_backfill_ready(self, station: str, overlays: list):
         # Guard against the station changing or multi-select being armed
         # while the backfill was in flight — stale results just get dropped.
-        if not overlays or self.manual_stations or self.home_active_stations:
+        if self.manual_stations or self.home_active_stations:
             return
         if self.current_station() != station:
             return
+        if not overlays:
+            self.status.showMessage(f"history backfill for {station} came back empty — try again shortly", 4000)
+            return
 
-        existing_times = {frame[0].volume_time for frame in self.history if len(frame) == 1}
-        new_frames = [[ov] for ov in overlays if ov.volume_time not in existing_times]
+        # Compare on the underlying volume identity, not the raw label —
+        # render_composite()/render_tilt() tag whichever frame you're
+        # currently viewing with a "(composite)"/"(X.X° tilt)" suffix for
+        # display, which shouldn't make that volume look "new" again the
+        # next time a backfill runs.
+        existing_times = {_base_volume_time(frame[0].volume_time) for frame in self.history if len(frame) == 1}
+        new_frames = [[ov] for ov in overlays if _base_volume_time(ov.volume_time) not in existing_times]
         if not new_frames:
+            self.status.showMessage(f"{station}: already have the recent volumes — nothing new to backfill yet", 4000)
             return
 
         was_at_live = (self.history_index == -1) or (self.history_index == len(self.history) - 1)
