@@ -980,35 +980,70 @@ def _geom_near(geom: dict, lat: float, lon: float, range_km: float) -> bool:
     return any(_haversine_km(lat, lon, c_lat, c_lon) <= buffered for c_lon, c_lat in coords)
 
 
+def _fetch_active_alerts_raw() -> dict:
+    """One HTTP call to NWS's active-alerts feed — already nationwide by
+    default, nothing station-specific about the request itself. Both
+    fetch_warnings (station-scoped) and fetch_all_warnings (nationwide)
+    share this; they only differ in how they filter the same response."""
+    req = urllib.request.Request(
+        _NWS_ALERTS_URL,
+        headers={"User-Agent": _NWS_USER_AGENT, "Accept": "application/geo+json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _alert_feature(feat: dict) -> dict | None:
+    props = feat.get("properties", {}) or {}
+    event = props.get("event")
+    geom = feat.get("geometry")
+    if event not in WARNING_EVENTS or not geom:
+        return None
+    return {
+        "type": "Feature",
+        "geometry": geom,
+        "properties": {
+            "event": event,
+            "headline": props.get("headline", "") or "",
+            "expires": props.get("expires", "") or "",
+            "color": WARNING_EVENT_COLORS.get(event, "#FFFFFF"),
+        },
+    }
+
+
 def fetch_warnings(center_lat: float, center_lon: float, range_km: float = 230.0) -> dict:
     try:
-        req = urllib.request.Request(
-            _NWS_ALERTS_URL,
-            headers={"User-Agent": _NWS_USER_AGENT, "Accept": "application/geo+json"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = _fetch_active_alerts_raw()
     except Exception as exc:  # noqa: BLE001
         return {"type": "FeatureCollection", "features": [], "_error": f"{exc.__class__.__name__}: {exc}"}
 
     features = []
     for feat in data.get("features", []):
-        props = feat.get("properties", {}) or {}
-        event = props.get("event")
         geom = feat.get("geometry")
-        if event not in WARNING_EVENTS or not geom:
+        if not geom or not _geom_near(geom, center_lat, center_lon, range_km):
             continue
-        if not _geom_near(geom, center_lat, center_lon, range_km):
-            continue
-        features.append({
-            "type": "Feature",
-            "geometry": geom,
-            "properties": {
-                "event": event,
-                "headline": props.get("headline", "") or "",
-                "expires": props.get("expires", "") or "",
-                "color": WARNING_EVENT_COLORS.get(event, "#FFFFFF"),
-            },
-        })
+        parsed = _alert_feature(feat)
+        if parsed is not None:
+            features.append(parsed)
+
+    return {"type": "FeatureCollection", "features": features}
+
+
+def fetch_all_warnings() -> dict:
+    """Every active NWS warning/watch/advisory in WARNING_EVENTS, nationwide —
+    no station or distance filter. Used for the initial-load overview so
+    major weather activity is visible right away, without having to guess
+    which station to point at first. Same single HTTP call as
+    fetch_warnings(); just skips the _geom_near filter."""
+    try:
+        data = _fetch_active_alerts_raw()
+    except Exception as exc:  # noqa: BLE001
+        return {"type": "FeatureCollection", "features": [], "_error": f"{exc.__class__.__name__}: {exc}"}
+
+    features = []
+    for feat in data.get("features", []):
+        parsed = _alert_feature(feat)
+        if parsed is not None:
+            features.append(parsed)
 
     return {"type": "FeatureCollection", "features": features}

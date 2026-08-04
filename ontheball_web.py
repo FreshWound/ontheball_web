@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.8"
+__version__ = "0.10.9"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -154,6 +154,16 @@ class WarningsFetchWorker(QThread):
         self.finished_ok.emit(result)
 
 
+class NationwideWarningsFetchWorker(QThread):
+    """One-shot fetch of every active NWS warning/watch/advisory nationwide,
+    used for the initial-load overview (see MainWindow._fetch_nationwide_warnings)."""
+    finished_ok = pyqtSignal(dict)
+
+    def run(self):
+        result = radar_source.fetch_all_warnings()
+        self.finished_ok.emit(result)
+
+
 class Bridge(QObject):
     overlaysReady = pyqtSignal(str, str)          # JSON list of overlays, meta text
     statusChanged = pyqtSignal(str)
@@ -215,6 +225,8 @@ class MainWindow(QMainWindow):
         self.bridge = Bridge()
         self.worker = None
         self.warnings_worker = None
+        self.nationwide_warnings_worker = None
+        self._skip_next_scoped_warnings_fetch = False
         self.history_backfill_worker = None
 
         # Home location: entered fresh each session, never persisted to disk.
@@ -299,18 +311,20 @@ class MainWindow(QMainWindow):
 
         controls.addWidget(QLabel("Auto-refresh:"))
         self.auto_refresh_checkbox = QCheckBox()
+        self.auto_refresh_checkbox.setChecked(True)  # default on, starts the timer + history backfill once JS is ready (see on_js_ready)
         self.auto_refresh_checkbox.toggled.connect(self.on_auto_refresh_toggled)
         controls.addWidget(self.auto_refresh_checkbox)
 
         controls.addWidget(QLabel("Reduce smoothing:"))
         self.detail_mode_checkbox = QCheckBox()
         self.detail_mode_checkbox.setToolTip(
-            "Off (default): wider search radius, better far-range coverage, some "
-            "blurring of small/isolated cells.\n"
-            "On: Py-ART's own defaults — sharper, more true-to-source detail, "
-            "but real data may drop out sooner at long range."
+            "On (default): Py-ART's own defaults — sharper, more true-to-source "
+            "detail, but real data may drop out sooner at long range.\n"
+            "Off: wider search radius, better far-range coverage, some "
+            "blurring of small/isolated cells."
         )
         self.detail_mode_checkbox.toggled.connect(self.on_detail_mode_toggled)
+        self.detail_mode_checkbox.setChecked(True)  # default on; fires on_detail_mode_toggled immediately (safe — no history yet)
         controls.addWidget(self.detail_mode_checkbox)
 
         controls.addWidget(QLabel("Debug hover:"))
@@ -417,7 +431,23 @@ class MainWindow(QMainWindow):
         self.bridge.stationsReady.emit(json.dumps(stations_payload))
         self.bridge.basemapChanged.emit(self.basemap_combo.currentData())
         self.bridge.opacityChanged.emit(self.opacity_slider.value())
+        self._fetch_nationwide_warnings()
+        self._skip_next_scoped_warnings_fetch = True
         self.refresh_now()
+        if self.auto_refresh_checkbox.isChecked():
+            self.on_auto_refresh_toggled(True)
+
+    def _fetch_nationwide_warnings(self):
+        """One-time nationwide alerts overview on startup, so major weather
+        activity is visible right away instead of only what's within range
+        of whichever station happens to be selected first. Subsequent
+        refreshes go back to the normal station-scoped fetch — see
+        _skip_next_scoped_warnings_fetch in refresh_now()."""
+        if self.nationwide_warnings_worker is not None and self.nationwide_warnings_worker.isRunning():
+            return
+        self.nationwide_warnings_worker = NationwideWarningsFetchWorker()
+        self.nationwide_warnings_worker.finished_ok.connect(self.on_warnings_ready)
+        self.nationwide_warnings_worker.start()
 
     def _show_static_frame(self, overlays: list):
         """Display a frame built from already-cached overlays (no fetch) —
@@ -789,11 +819,16 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
         if self.warnings_worker is None or not self.warnings_worker.isRunning():
-            ref_station = stations[0]
-            meta = radar_source.STATIONS[ref_station]
-            self.warnings_worker = WarningsFetchWorker(meta["lat"], meta["lon"])
-            self.warnings_worker.finished_ok.connect(self.on_warnings_ready)
-            self.warnings_worker.start()
+            if self._skip_next_scoped_warnings_fetch:
+                # First load already got the nationwide overview instead —
+                # see _fetch_nationwide_warnings() in on_js_ready().
+                self._skip_next_scoped_warnings_fetch = False
+            else:
+                ref_station = stations[0]
+                meta = radar_source.STATIONS[ref_station]
+                self.warnings_worker = WarningsFetchWorker(meta["lat"], meta["lon"])
+                self.warnings_worker.finished_ok.connect(self.on_warnings_ready)
+                self.warnings_worker.start()
 
     def _update_measured_refresh_interval(self, overlays: list):
         """Update self.auto_refresh_interval_sec from the real gap between this

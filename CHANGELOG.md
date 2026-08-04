@@ -2,6 +2,28 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.9 — smarter defaults, nationwide alerts on startup
+
+- Auto-refresh and Reduce smoothing now default to **on** instead of off.
+  Auto-refresh defaulting on meant the history-backfill trigger needed a
+  real startup path too (previously only fired from a checkbox toggle or
+  a station change) — `on_js_ready()` now calls the same
+  `on_auto_refresh_toggled(True)` logic directly once the page/web channel
+  is actually ready, rather than relying on the checkbox's own `toggled`
+  signal firing during construction (which would've raced ahead of the
+  web channel being ready to receive anything).
+- NWS alerts now load nationwide on first launch instead of scoped to
+  whichever station happens to be selected first — so you can see where
+  the weather actually is before picking where to look closer. Turns out
+  this cost nothing extra: `api.weather.gov/alerts/active` was already
+  returning every active alert in the country in one call
+  (`_fetch_active_alerts_raw()`); the station-scoped version just threw
+  away anything outside ~265km afterward. `fetch_all_warnings()` skips
+  that distance filter for the first load only — every refresh after
+  that (auto-refresh tick, manual refresh, station change) goes back to
+  the normal station-scoped view, so the map doesn't stay cluttered with
+  nationwide polygons once you're actively looking at one area.
+
 ## What's new in v0.10.8 — auto-refresh backfill on station change, frame time badge
 
 - Fixed: switching stations while Auto-refresh was already checked didn't
