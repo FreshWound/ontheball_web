@@ -2,6 +2,24 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.13 — backfill request during startup's in-flight fetch was silently dropped
+
+- Fixed: switching stations right after launch (or during any backfill
+  already in flight — a fast multi-select/Home switch could hit this too)
+  didn't load that station's history — you had to reselect it once the
+  first fetch finished for it to actually pull. Auto-refresh defaulting
+  on means a backfill kicks off immediately at startup for the default
+  station; `_start_history_backfill()`'s "don't start a second worker
+  while one's running" guard was just discarding the newer request
+  outright instead of remembering it.
+- `_start_history_backfill()` now sets a pending flag when it's asked to
+  run while busy, and `_on_history_backfill_worker_finished()` (hooked to
+  the worker's `finished` signal) re-fires it once the in-flight fetch
+  completes — for whatever station/selection is actually active *then*,
+  not whatever triggered the original request. Any number of rapid
+  switches while busy collapse into one deferred backfill for the final
+  selection, rather than queuing one per switch.
+
 ## What's new in v0.10.12 — ` toggles radar opacity
 
 - Backtick (`` ` ``) instantly blanks the radar overlay (opacity 0) to peek

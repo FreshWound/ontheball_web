@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.12"
+__version__ = "0.10.13"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -249,6 +249,7 @@ class MainWindow(QMainWindow):
         self.nationwide_warnings_worker = None
         self._skip_next_scoped_warnings_fetch = False
         self.history_backfill_worker = None
+        self._backfill_pending = False
         self._pre_toggle_opacity = None
 
         # Home location: entered fresh each session, never persisted to disk.
@@ -634,12 +635,25 @@ class MainWindow(QMainWindow):
         bit further back since each station's own cadence runs independently
         rather than being anchored fresh every poll."""
         if self.history_backfill_worker is not None and self.history_backfill_worker.isRunning():
+            # A backfill's already in flight (startup fires one right away,
+            # so a fast station/multi-select/Home switch can land here) —
+            # remember to run it again once this one's done, for whatever's
+            # actually active by then, instead of silently dropping the
+            # request. Coalesces any number of rapid switches into one
+            # deferred backfill for the final selection.
+            self._backfill_pending = True
             return
         stations = self._active_backfill_stations()
         self.status.showMessage(f"pulling recent history for {' + '.join(stations)}…")
         self.history_backfill_worker = HistoryBackfillWorker(stations, HISTORY_BACKFILL_COUNT)
         self.history_backfill_worker.finished_ok.connect(self.on_history_backfill_ready)
+        self.history_backfill_worker.finished.connect(self._on_history_backfill_worker_finished)
         self.history_backfill_worker.start()
+
+    def _on_history_backfill_worker_finished(self):
+        if self._backfill_pending:
+            self._backfill_pending = False
+            self._start_history_backfill()
 
     def on_history_backfill_ready(self, stations: list, per_station: dict):
         # Guard against the station/multi-select/Home selection changing
