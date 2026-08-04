@@ -2,6 +2,39 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.12 — ` toggles radar opacity
+
+- Backtick (`` ` ``) instantly blanks the radar overlay (opacity 0) to peek
+  at the bare map underneath, then restores it to whatever opacity you
+  actually had dialed in — not just a fixed default. Same hotkey-relay
+  path as the product/playback keys (`assets/map.html` → `reportHotkey` →
+  `Bridge.hotkeyPressed` → `MainWindow.on_hotkey`).
+
+## What's new in v0.10.11 — history backfill now works for multi-select and Home
+
+- Auto-refresh's history backfill previously only worked in single-station
+  view — shift-click multi-select and Home both explicitly skipped it,
+  leaving you with a single frame until enough real refresh cycles built
+  history up manually.
+- `HistoryBackfillWorker` now takes a list of stations (single-station is
+  just a list of one) and fetches each station's recent volumes in
+  parallel, same thread-pool pattern `MultiRadarFetchWorker` already uses
+  for live fetches. `on_history_backfill_ready()` zips each station's
+  results together by position — frame *i* across stations — into
+  frames, the same "whichever stations were fetched together count as one
+  time-slice" convention live multi-station refreshes already use, rather
+  than trying to time-align by actual scan timestamp.
+- Worth knowing: stations don't necessarily share a scan cadence, so a
+  backfilled frame's per-station volumes can end up a few minutes further
+  apart than a live-refreshed frame's would — same underlying imprecision
+  live multi-station frames already have, just compounded a bit more
+  since each station's own cadence runs independently the further back
+  you go, instead of being anchored fresh every poll cycle.
+- Backfill now also fires (when Auto-refresh is on) after finishing a
+  shift-click multi-select and after Set Home/Clear Home — previously it
+  only fired on the checkbox's own toggle, a single-station dropdown pick,
+  or a map-marker click.
+
 ## What's new in v0.10.10 — history-backfill dedup was silently swallowing valid re-toggles
 
 - Fixed: switching Tilt to a specific angle and back to Composite, then

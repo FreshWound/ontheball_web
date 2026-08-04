@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.10"
+__version__ = "0.10.12"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -132,22 +132,34 @@ class MultiRadarFetchWorker(QThread):
 
 
 class HistoryBackfillWorker(QThread):
-    """Fetches a handful of volumes just before the current one for a single
-    station — used when auto-refresh is turned on, so playback has some
-    real context to scrub through instead of starting from a single frame."""
-    finished_ok = pyqtSignal(str, list)   # station, list[RadarOverlay] oldest->newest
+    """Fetches a handful of volumes just before the current one for each of
+    `stations` in parallel — used when auto-refresh is turned on (or a
+    station/multi-select/Home change happens while it's already on), so
+    playback has some real context to scrub through instead of starting
+    from a single frame. Works for a single station or several at once —
+    the caller (on_history_backfill_ready) zips per-station results into
+    frames the same way live multi-station refreshes already do."""
+    finished_ok = pyqtSignal(list, dict)   # stations (as requested), {station: [RadarOverlay,...] oldest->newest}
 
-    def __init__(self, station: str, count: int):
+    def __init__(self, stations: list, count: int):
         super().__init__()
-        self.station = station
+        self.stations = list(stations)
         self.count = count
 
     def run(self):
-        try:
-            overlays = radar_source.get_recent_overlays(self.station, self.count)
-        except Exception:  # noqa: BLE001
-            overlays = []
-        self.finished_ok.emit(self.station, overlays)
+        results = {}
+        max_workers = min(len(self.stations), 4) or 1
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_station = {
+                pool.submit(radar_source.get_recent_overlays, s, self.count): s for s in self.stations
+            }
+            for future in as_completed(future_to_station):
+                station = future_to_station[future]
+                try:
+                    results[station] = future.result()
+                except Exception:  # noqa: BLE001
+                    results[station] = []
+        self.finished_ok.emit(self.stations, results)
 
 
 class WarningsFetchWorker(QThread):
@@ -237,6 +249,7 @@ class MainWindow(QMainWindow):
         self.nationwide_warnings_worker = None
         self._skip_next_scoped_warnings_fetch = False
         self.history_backfill_worker = None
+        self._pre_toggle_opacity = None
 
         # Home location: entered fresh each session, never persisted to disk.
         # When set, self.home_active_stations overrides whatever's picked in
@@ -313,7 +326,6 @@ class MainWindow(QMainWindow):
         self.opacity_slider.setFixedWidth(110)
         self.opacity_slider.valueChanged.connect(self.on_opacity_changed)
         controls.addWidget(self.opacity_slider)
-
         self.refresh_btn = QPushButton("Refresh now")
         self.refresh_btn.clicked.connect(self.refresh_now)
         controls.addWidget(self.refresh_btn)
@@ -548,6 +560,7 @@ class MainWindow(QMainWindow):
             ordered = [cached[st] for st in self.manual_stations]
             self._show_static_frame(ordered)
             self.status.showMessage(f"Showing {' + '.join(self.manual_stations)}", 3000)
+            self._maybe_backfill_on_station_change()
             return
 
         if self.worker is not None and self.worker.isRunning():
@@ -576,6 +589,7 @@ class MainWindow(QMainWindow):
         self._update_measured_refresh_interval(new_overlays)
         self._show_static_frame(ordered)
         self.status.showMessage(f"Showing {' + '.join(ov.station for ov in ordered)}", 3000)
+        self._maybe_backfill_on_station_change()
 
     def current_station(self) -> str:
         return self.station_combo.currentData()
@@ -592,47 +606,67 @@ class MainWindow(QMainWindow):
 
     def _maybe_backfill_on_station_change(self):
         """Auto-refresh's history backfill only fires when the checkbox is
-        actually toggled on — switching stations while it's already checked
-        used to leave you with a single fresh frame until you flipped it off
-        and back on. Call this from every station-change path instead."""
+        actually toggled on — any station-selection change while it's
+        already checked (single-station switch, shift-click multi-select,
+        Set/Clear Home) used to leave you with a single fresh frame until
+        you flipped the checkbox off and back on. Call this from every one
+        of those paths instead."""
         if self.auto_refresh_checkbox.isChecked():
             self._start_history_backfill()
 
+    def _active_backfill_stations(self) -> list:
+        if self.manual_stations:
+            return list(self.manual_stations)
+        if self.home_active_stations:
+            return list(self.home_active_stations)
+        return [self.current_station()]
+
     def _start_history_backfill(self):
-        """One-time pull of a few recent volumes when auto-refresh is turned
-        on — single-station live view only (mirrors the Tilt dropdown's
-        restriction): Home/multi-select would mean backfilling several
-        stations at once for one shared slider, which doesn't map cleanly."""
-        if self.manual_stations or self.home_active_stations:
-            return
+        """One-time pull of a few recent volumes per active station. Works
+        for single-station, shift-click multi-select, and Home alike —
+        each station's own history is fetched independently and zipped
+        into frames by position (on_history_backfill_ready), the same
+        "whichever stations were fetched together count as one frame"
+        convention live multi-station refreshes already use. Stations
+        don't necessarily scan in lockstep, so a backfilled frame's
+        per-station volumes can be a few minutes apart from each other —
+        same imprecision live refreshes already have, just compounded a
+        bit further back since each station's own cadence runs independently
+        rather than being anchored fresh every poll."""
         if self.history_backfill_worker is not None and self.history_backfill_worker.isRunning():
             return
-        station = self.current_station()
-        self.status.showMessage(f"pulling recent history for {station}…")
-        self.history_backfill_worker = HistoryBackfillWorker(station, HISTORY_BACKFILL_COUNT)
+        stations = self._active_backfill_stations()
+        self.status.showMessage(f"pulling recent history for {' + '.join(stations)}…")
+        self.history_backfill_worker = HistoryBackfillWorker(stations, HISTORY_BACKFILL_COUNT)
         self.history_backfill_worker.finished_ok.connect(self.on_history_backfill_ready)
         self.history_backfill_worker.start()
 
-    def on_history_backfill_ready(self, station: str, overlays: list):
-        # Guard against the station changing or multi-select being armed
+    def on_history_backfill_ready(self, stations: list, per_station: dict):
+        # Guard against the station/multi-select/Home selection changing
         # while the backfill was in flight — stale results just get dropped.
-        if self.manual_stations or self.home_active_stations:
-            return
-        if self.current_station() != station:
-            return
-        if not overlays:
-            self.status.showMessage(f"history backfill for {station} came back empty — try again shortly", 4000)
+        if set(self._active_backfill_stations()) != set(stations):
             return
 
-        # Compare on the underlying volume identity, not the raw label —
-        # render_composite()/render_tilt() tag whichever frame you're
-        # currently viewing with a "(composite)"/"(X.X° tilt)" suffix for
-        # display, which shouldn't make that volume look "new" again the
-        # next time a backfill runs.
-        existing_times = {_base_volume_time(frame[0].volume_time) for frame in self.history if len(frame) == 1}
-        new_frames = [[ov] for ov in overlays if _base_volume_time(ov.volume_time) not in existing_times]
+        per_station_lists = [lst for lst in (per_station.get(s, []) for s in stations) if lst]
+        if not per_station_lists:
+            self.status.showMessage(f"history backfill for {' + '.join(stations)} came back empty — try again shortly", 4000)
+            return
+
+        # Zip by position, not by matching timestamps — stations don't
+        # necessarily share a scan cadence, so "N steps back" per station is
+        # the same approximation live multi-station frames already rely on.
+        common_len = min(len(lst) for lst in per_station_lists)
+        zipped_frames = [[lst[i] for lst in per_station_lists] for i in range(common_len)]
+
+        def _frame_key(frame):
+            return frozenset((ov.station, _base_volume_time(ov.volume_time)) for ov in frame)
+
+        existing_keys = {_frame_key(frame) for frame in self.history}
+        new_frames = [frame for frame in zipped_frames if _frame_key(frame) not in existing_keys]
         if not new_frames:
-            self.status.showMessage(f"{station}: already have the recent volumes — nothing new to backfill yet", 4000)
+            self.status.showMessage(
+                f"{' + '.join(stations)}: already have the recent volumes — nothing new to backfill yet", 4000
+            )
             return
 
         was_at_live = (self.history_index == -1) or (self.history_index == len(self.history) - 1)
@@ -650,7 +684,7 @@ class MainWindow(QMainWindow):
         self.history_slider.blockSignals(False)
         self._display_current_frame()
 
-        self.status.showMessage(f"loaded {len(new_frames)} recent frame(s) for {station}", 4000)
+        self.status.showMessage(f"loaded {len(new_frames)} recent frame(s) for {' + '.join(stations)}", 4000)
 
     def on_detail_mode_toggled(self, checked: bool):
         radar_source.set_smoothing_mode(checked)
@@ -731,6 +765,7 @@ class MainWindow(QMainWindow):
         self.bridge.homeMarkerReady.emit(json.dumps({"lat": lat, "lon": lon}))
         self.reset_history()
         self.refresh_now()
+        self._maybe_backfill_on_station_change()
 
     def on_clear_home_clicked(self):
         self._disarm_home_selection()
@@ -744,6 +779,7 @@ class MainWindow(QMainWindow):
         self.bridge.homeMarkerCleared.emit()
         self.reset_history()
         self.refresh_now()
+        self._maybe_backfill_on_station_change()
 
     def on_cursor_moved(self, lat: float, lon: float):
         if self.home_lat is not None and self.home_lon is not None:
@@ -934,18 +970,32 @@ class MainWindow(QMainWindow):
 
     def on_hotkey(self, key: str):
         """Handle hotkeys relayed from the map page: 1-4/BR-BV-CC-ZDR to
-        jump product, Left/Right arrows to step playback one frame."""
+        jump product, Left/Right arrows to step playback one frame, `
+        (backtick) to blank the radar opacity and back."""
         if key == "ArrowLeft":
             self.step_history(-1)
             return
         if key == "ArrowRight":
             self.step_history(1)
             return
+        if key == "`":
+            self.toggle_radar_opacity()
+            return
         product_key = PRODUCT_HOTKEYS.get(key.lower())
         if product_key is not None:
             idx = self.product_combo.findData(product_key)
             if idx >= 0:
                 self.product_combo.setCurrentIndex(idx)
+
+    def toggle_radar_opacity(self):
+        """` key: instantly blank the radar overlay (opacity 0) to peek at
+        the bare map underneath, then restore it to wherever it was before —
+        rather than losing whatever opacity you'd actually dialed in."""
+        if self.opacity_slider.value() > 0:
+            self._pre_toggle_opacity = self.opacity_slider.value()
+            self.opacity_slider.setValue(0)
+        else:
+            self.opacity_slider.setValue(self._pre_toggle_opacity or 30)
 
     def _display_current_frame(self):
         if not self.history:

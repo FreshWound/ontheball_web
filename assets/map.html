@@ -516,12 +516,14 @@
 
       // Hotkeys: 1/2/3/4 or B/V/C/Z jump straight to a product
       // (Reflectivity/Base Velocity/Correlation Coefficient/ZDR), Left/Right
-      // arrows step playback one frame at a time. Relayed to Python, which
-      // owns the actual product-combo/history-slider state.
+      // arrows step playback one frame at a time, ` (backtick) toggles radar
+      // opacity to 0 and back. Relayed to Python, which owns the actual
+      // product-combo/history-slider/opacity-slider state.
       const HOTKEYS = new Set([
         '1', '2', '3', '4',
         'b', 'B', 'v', 'V', 'c', 'C', 'z', 'Z',
         'ArrowLeft', 'ArrowRight',
+        '`',
       ]);
       document.addEventListener('keydown', (e) => {
         if (!HOTKEYS.has(e.key)) return;
