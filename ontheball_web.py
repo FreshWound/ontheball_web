@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.13"
+__version__ = "0.10.15"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -924,6 +924,18 @@ class MainWindow(QMainWindow):
 
     def on_overlays_ready(self, overlays: list):
         self._update_measured_refresh_interval(overlays)
+
+        def _frame_key(frame):
+            return frozenset((ov.station, _base_volume_time(ov.volume_time)) for ov in frame)
+
+        if self.history and _frame_key(overlays) == _frame_key(self.history[-1]):
+            # Same volume(s) as the current last frame — a repeat poll that
+            # landed before a genuinely new scan was available upstream
+            # (NEXRAD isn't perfectly punctual; the measured-cadence timer
+            # is a good guess, not a guarantee). Appending it anyway would
+            # silently duplicate a history frame — identical content,
+            # counted as a separate time step you could scrub "back" into.
+            return
 
         was_at_live = (self.history_index == -1) or (self.history_index == len(self.history) - 1)
 

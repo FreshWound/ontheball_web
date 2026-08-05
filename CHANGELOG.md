@@ -2,6 +2,39 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.15 — duplicate history frame on a repeat live poll
+
+- Fixed: `on_overlays_ready()` (every live refresh, manual or
+  auto-refresh) appended whatever it fetched as a new history frame
+  unconditionally — if a refresh landed before the station's actual
+  latest volume had advanced (NEXRAD scan timing isn't perfectly
+  punctual; the measured-cadence auto-refresh interval is a good guess,
+  not a guarantee), the same volume got appended a second time,
+  showing up as an extra "step back" that's actually identical to live.
+- Now compares the incoming frame's (station, volume_time) against the
+  current last frame before appending — same underlying-identity
+  comparison the backfill dedup already uses (`_base_volume_time()`) —
+  and skips the append if it's a repeat.
+
+## What's new in v0.10.14 — fixed the flicker on every history step / product / tilt change
+
+- Every overlay update (history-slider step, playback frame, product
+  switch, tilt change, arrow-key stepping) was removing all radar
+  layers/sources and re-adding them fresh — `map.removeLayer()` +
+  `map.removeSource()` then `map.addSource()` + `map.addLayer()`. That
+  briefly leaves the map with zero radar layers while the new PNG data
+  URI decodes, which reads as a sharp flicker/flash, worse the faster you
+  step (arrow keys, play mode).
+- Fixed in `assets/map.html`'s `renderOverlayItems()`: when a source for
+  a given slot already exists, it now calls MapLibre's
+  `ImageSource.updateImage({url, coordinates})` to swap the texture in
+  place instead of tearing the layer down — confirmed this method exists
+  in the bundled MapLibre 3.6.2. The layer never leaves the map, so there's
+  nothing to flash. Sources/layers are only actually removed and rebuilt
+  when the number of overlay slots changes (switching between
+  single-station and multi-station/Home views) — a rarer transition where
+  a brief rebuild is expected anyway.
+
 ## What's new in v0.10.13 — backfill request during startup's in-flight fetch was silently dropped
 
 - Fixed: switching stations right after launch (or during any backfill
