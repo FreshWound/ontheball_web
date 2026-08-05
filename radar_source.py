@@ -205,21 +205,6 @@ STATIONS = {
 }
 
 
-def find_closest_stations(lat: float, lon: float, n: int = 3) -> list:
-    """Return the n station codes closest to the given lat/lon, nearest first.
-
-    Used for the settable-home-location feature: rather than a fixed
-    dual-radar preset, the user enters coordinates each session and this
-    picks whichever stations are actually nearest to them.
-    """
-    distances = [
-        (code, _haversine_km(lat, lon, meta["lat"], meta["lon"]))
-        for code, meta in STATIONS.items()
-    ]
-    distances.sort(key=lambda pair: pair[1])
-    return [code for code, _dist in distances[:n]]
-
-
 REFLECTIVITY_FLOOR = 5.0       # dBZ, values below this are treated as clear air
 REFLECTIVITY_MAX = 75.0        # dBZ, colormap ceiling
 CORR_COEFF_MIN = 0.80          # threshold for dedicated correlation-coefficient overlay filtering

@@ -2,6 +2,29 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.17 — Home Location no longer selects stations
+
+- Home Location is now purely a map marker plus the distance-from-cursor
+  readout — it no longer loads the 3 closest stations as a multi-station
+  view. Shift-click multi-select already covers picking more than one
+  station, and having two different features both drive station
+  selection (Home's closest-3, plus manual multi-select fighting over
+  who takes priority) was redundant complexity now that multi-select
+  exists.
+- Setting or clearing Home no longer touches the current view at all —
+  no history reset, no refetch. It just places/removes the marker and
+  starts/stops the "X mi from home" readout as the cursor moves.
+- Removed `self.home_active_stations`, `HOME_STATION_COUNT`, and
+  `radar_source.find_closest_stations()` (now fully unused) rather than
+  leaving them as dead code. `_active_stations()` (shared by
+  `refresh_now()`, history backfill, and the live-fetch staleness checks
+  added in v0.10.16) simplifies to manual multi-select > single station,
+  dropping the home-priority tier entirely.
+- Went through every comment/docstring that mentioned "Home mode" or
+  "Home/multi-select" as a station-selecting concept and updated them —
+  didn't want to leave stale documentation the way the CHANGELOG itself
+  went stale earlier in this project.
+
 ## What's new in v0.10.16 — the "stuck on default station" bug, and why history backfill was slowing switches down
 
 - Fixed: `refresh_now()`'s "don't start a second fetch while one's

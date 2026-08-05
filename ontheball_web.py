@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.16"
+__version__ = "0.10.17"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -46,7 +46,6 @@ PRODUCT_HOTKEYS = {       # lowercased JS e.key -> radar_source.PRODUCTS key
 MAX_HISTORY = 12          # cap on cached in-session frames
 HISTORY_BACKFILL_COUNT = 5  # volumes pulled once when auto-refresh is turned on
 PLAYBACK_FRAME_MS = 600   # time each frame stays on screen during playback
-HOME_STATION_COUNT = 3    # how many closest stations to load when Home Location is set
 DEFAULT_REFRESH_INTERVAL_SEC = 300   # used until we've measured a station's actual cadence
 MIN_REFRESH_INTERVAL_SEC = 60        # floor, so a fast-cycling station can't cause hammering
 MAX_REFRESH_INTERVAL_SEC = 900       # ceiling, in case of a bad/stale reading
@@ -121,8 +120,8 @@ class MultiRadarFetchWorker(QThread):
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"{st}: {exc.__class__.__name__}: {exc}")
 
-        # Reassemble in the original station order (closest-first for Home
-        # mode) regardless of which fetch happened to finish first.
+        # Reassemble in the original station order regardless of which fetch
+        # happened to finish first.
         overlays = [overlays_by_index[i] for i in range(len(self.stations)) if i in overlays_by_index]
 
         if overlays:
@@ -134,7 +133,7 @@ class MultiRadarFetchWorker(QThread):
 class HistoryBackfillWorker(QThread):
     """Fetches a handful of volumes just before the current one for each of
     `stations` in parallel — used when auto-refresh is turned on (or a
-    station/multi-select/Home change happens while it's already on), so
+    station/multi-select change happens while it's already on), so
     playback has some real context to scrub through instead of starting
     from a single frame. Works for a single station or several at once —
     the caller (on_history_backfill_ready) zips per-station results into
@@ -254,16 +253,16 @@ class MainWindow(QMainWindow):
         self._pre_toggle_opacity = None
 
         # Home location: entered fresh each session, never persisted to disk.
-        # When set, self.home_active_stations overrides whatever's picked in
-        # the Station dropdown until the user manually selects a station again.
+        # Purely a map marker + distance-from-cursor reference now — it no
+        # longer selects which station(s) are being viewed (shift-click
+        # multi-select covers that; see self.manual_stations below).
         self.home_lat: float | None = None
         self.home_lon: float | None = None
-        self.home_active_stations: list | None = None
 
         # Shift-click multi-select: an explicit, ordered list of station
         # codes the user has manually armed by shift-clicking their markers.
-        # Overrides home_active_stations while non-empty; a plain (non-shift)
-        # station click clears it and goes back to single-station mode.
+        # A plain (non-shift) station click clears it and goes back to
+        # single-station mode.
         self.manual_stations: list = []
         self._pending_manual_cached: dict = {}
 
@@ -310,7 +309,7 @@ class MainWindow(QMainWindow):
         self.tilt_combo = QComboBox()
         self.tilt_combo.addItem("—", userData=None)
         self.tilt_combo.setEnabled(False)
-        self.tilt_combo.setToolTip("Only available for a single loaded station (not Home/multi-select view)")
+        self.tilt_combo.setToolTip("Only available for a single loaded station (not multi-select view)")
         self.tilt_combo.currentIndexChanged.connect(self.on_tilt_changed)
         controls.addWidget(self.tilt_combo)
 
@@ -499,10 +498,11 @@ class MainWindow(QMainWindow):
             return
 
         # If this station is already rendered in the current frame (e.g. one
-        # of the up-to-3 Home-mode stations already on screen), reuse that
-        # overlay instead of firing a brand-new fetch — it's already been
-        # downloaded and gridded, so this is instant instead of repeating
-        # the whole S3-download-plus-Py-ART pipeline for data we already have.
+        # of the stations in a shift-click multi-select already on screen),
+        # reuse that overlay instead of firing a brand-new fetch — it's
+        # already been downloaded and gridded, so this is instant instead of
+        # repeating the whole S3-download-plus-Py-ART pipeline for data we
+        # already have.
         cached_overlay = None
         if self.history:
             current_idx = max(0, min(self.history_index, len(self.history) - 1))
@@ -511,7 +511,6 @@ class MainWindow(QMainWindow):
                     cached_overlay = ov
                     break
 
-        self.home_active_stations = None
         if self.manual_stations:
             self.manual_stations = []
             self.bridge.selectedStationsChanged.emit(json.dumps([]))
@@ -540,7 +539,6 @@ class MainWindow(QMainWindow):
         else:
             self.manual_stations.append(code)
 
-        self.home_active_stations = None
         self.bridge.selectedStationsChanged.emit(json.dumps(self.manual_stations))
 
         if self.manual_stations:
@@ -623,22 +621,19 @@ class MainWindow(QMainWindow):
             self._start_history_backfill()
 
     def _active_stations(self) -> list:
-        """Whichever station(s) are actually selected right now: manual
-        multi-select > Home's closest-3 > the single station dropdown.
-        Same manual > home > single priority refresh_now() uses, shared
-        here so backfill and the live-fetch staleness checks agree with
-        it and with each other."""
+        """Whichever station(s) are actually selected right now: shift-click
+        multi-select if any are armed, otherwise the single station
+        dropdown. Shared by refresh_now(), backfill, and the live-fetch
+        staleness checks so they all agree with each other."""
         if self.manual_stations:
             return list(self.manual_stations)
-        if self.home_active_stations:
-            return list(self.home_active_stations)
         return [self.current_station()]
 
     def _start_history_backfill(self):
         """One-time pull of a few recent volumes per active station. Works
-        for single-station, shift-click multi-select, and Home alike —
-        each station's own history is fetched independently and zipped
-        into frames by position (on_history_backfill_ready), the same
+        for single-station and shift-click multi-select alike — each
+        station's own history is fetched independently and zipped into
+        frames by position (on_history_backfill_ready), the same
         "whichever stations were fetched together count as one frame"
         convention live multi-station refreshes already use. Stations
         don't necessarily scan in lockstep, so a backfilled frame's
@@ -648,7 +643,7 @@ class MainWindow(QMainWindow):
         rather than being anchored fresh every poll."""
         if self.history_backfill_worker is not None and self.history_backfill_worker.isRunning():
             # A backfill's already in flight (startup fires one right away,
-            # so a fast station/multi-select/Home switch can land here) —
+            # so a fast station/multi-select switch can land here) —
             # remember to run it again once this one's done, for whatever's
             # actually active by then, instead of silently dropping the
             # request. Coalesces any number of rapid switches into one
@@ -668,8 +663,8 @@ class MainWindow(QMainWindow):
             self._start_history_backfill()
 
     def on_history_backfill_ready(self, stations: list, per_station: dict):
-        # Guard against the station/multi-select/Home selection changing
-        # while the backfill was in flight — stale results just get dropped.
+        # Guard against the station/multi-select selection changing while
+        # the backfill was in flight — stale results just get dropped.
         if set(self._active_stations()) != set(stations):
             return
 
@@ -723,12 +718,11 @@ class MainWindow(QMainWindow):
             # switching tilts.
             self.on_tilt_changed(self.tilt_combo.currentIndex())
         else:
-            # Multi-station (Home/manual select) has no equivalent cached
-            # re-render path yet, so fall back to a full refresh.
+            # Multi-station (shift-click multi-select) has no equivalent
+            # cached re-render path yet, so fall back to a full refresh.
             self.refresh_now()
 
     def on_station_changed(self, _index: int):
-        self.home_active_stations = None
         if self.manual_stations:
             self.manual_stations = []
             self.bridge.selectedStationsChanged.emit(json.dumps([]))
@@ -780,29 +774,24 @@ class MainWindow(QMainWindow):
         self._apply_home_location(lat, lon)
 
     def _apply_home_location(self, lat: float, lon: float):
+        """Sets the home marker and enables the distance-from-cursor readout.
+        Purely informational now — it doesn't touch station selection or
+        the current view at all (shift-click multi-select covers picking
+        more than one station; see on_station_shift_selected)."""
         self.home_lat = lat
         self.home_lon = lon
-        self.home_active_stations = radar_source.find_closest_stations(lat, lon, n=HOME_STATION_COUNT)
-        if self.manual_stations:
-            self.manual_stations = []
-            self.bridge.selectedStationsChanged.emit(json.dumps([]))
-        self.home_status_label.setText(f"Home set — showing {', '.join(self.home_active_stations)}")
+        self.home_status_label.setText("Home set")
         self.bridge.homeMarkerReady.emit(json.dumps({"lat": lat, "lon": lon}))
-        self.reset_history()
-        self.refresh_now()
 
     def on_clear_home_clicked(self):
         self._disarm_home_selection()
         self.home_lat = None
         self.home_lon = None
-        self.home_active_stations = None
         self.home_lat_input.clear()
         self.home_lon_input.clear()
         self.distance_label.setText("")
         self.home_status_label.setText("Home not set — type lat/lon, or leave both blank and click Set Home to pick a spot on the map")
         self.bridge.homeMarkerCleared.emit()
-        self.reset_history()
-        self.refresh_now()
 
     def on_cursor_moved(self, lat: float, lon: float):
         if self.home_lat is not None and self.home_lon is not None:
@@ -817,8 +806,8 @@ class MainWindow(QMainWindow):
         cursor and send it to JS so the legend can highlight where that
         value sits on the color scale — the on-map equivalent of GR2Analyst's
         cursor readout. Tries each station currently on screen (there can be
-        up to 3 in Home mode) and uses whichever one's grid actually covers
-        that point."""
+        more than one with shift-click multi-select) and uses whichever
+        one's grid actually covers that point."""
         if not self.history:
             self.bridge.hoverValueReady.emit(json.dumps({"value": None}))
             return
@@ -919,7 +908,7 @@ class MainWindow(QMainWindow):
         fetch's volume(s) and the previous one for the same station(s), so
         auto-refresh follows each radar's actual scan cadence instead of a
         fixed guess. Uses the fastest (minimum) cadence among active stations,
-        so a multi-station Home view doesn't miss a quicker-cycling site."""
+        so a multi-station (shift-click) view doesn't miss a quicker-cycling site."""
         deltas = []
         for overlay in overlays:
             new_dt = _parse_volume_datetime(overlay.volume_time)
@@ -1105,7 +1094,7 @@ class MainWindow(QMainWindow):
 
     def _sync_tilt_dropdown(self, overlays: list):
         """Tilt selection only makes sense for a single displayed station —
-        Home/multi-select frames can each be on a different VCP with a
+        multi-select frames can each be on a different VCP with a
         different set of available elevation angles, so there's no one
         Tilt list that would apply to all of them at once."""
         self.tilt_combo.blockSignals(True)

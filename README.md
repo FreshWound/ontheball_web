@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.10.16)
+# ontheball — web basemap prototype (v0.10.17)
 
 ![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 
@@ -65,10 +65,11 @@ the latest volume for the selected station from
 `s3://unidata-nexrad-level2` (free, anonymous), decodes + clutter-filters
 it with Py-ART, grids it, and renders it onto the map as a semi-transparent
 overlay — hovering the map shows the real value under the cursor
-highlighted on the legend. Enter a Home Location (or click the map) to
-load and track the 3 closest stations automatically. The basemap itself
-is loaded live from OpenFreeMap (`tiles.openfreemap.org`) — needs your
-normal internet access, no API key.
+highlighted on the legend. Shift-click station markers to view several
+at once. Enter a Home Location (or click the map) to place a marker and
+see live distance-from-cursor readouts — it's just a reference point, not
+a station picker. The basemap itself is loaded live from OpenFreeMap
+(`tiles.openfreemap.org`) — needs your normal internet access, no API key.
 
 <!--
 MAINTENANCE NOTE: Install (one-time) and Run stay as the first two
