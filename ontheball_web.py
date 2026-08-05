@@ -30,7 +30,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.15"
+__version__ = "0.10.16"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -245,6 +245,7 @@ class MainWindow(QMainWindow):
 
         self.bridge = Bridge()
         self.worker = None
+        self._refresh_pending = False
         self.warnings_worker = None
         self.nationwide_warnings_worker = None
         self._skip_next_scoped_warnings_fetch = False
@@ -457,7 +458,13 @@ class MainWindow(QMainWindow):
         self._skip_next_scoped_warnings_fetch = True
         self.refresh_now()
         if self.auto_refresh_checkbox.isChecked():
-            self.on_auto_refresh_toggled(True)
+            # Just the timer here — not on_auto_refresh_toggled(True), which
+            # would also fire _start_history_backfill() immediately,
+            # racing it against the refresh_now() fetch just launched above
+            # for the same CPU/network. Backfill kicks in on its own once
+            # that initial live frame actually lands — see the end of
+            # on_overlays_ready().
+            self.auto_timer.start(self.auto_refresh_interval_sec * 1000)
 
     def _fetch_nationwide_warnings(self):
         """One-time nationwide alerts overview on startup, so major weather
@@ -521,7 +528,6 @@ class MainWindow(QMainWindow):
         else:
             self.reset_history()
             self.refresh_now()
-            self._maybe_backfill_on_station_change()
 
     def on_station_shift_selected(self, code: str):
         """Shift-click toggles a station in/out of the manual selection and
@@ -606,16 +612,22 @@ class MainWindow(QMainWindow):
             self.auto_timer.stop()
 
     def _maybe_backfill_on_station_change(self):
-        """Auto-refresh's history backfill only fires when the checkbox is
-        actually toggled on — any station-selection change while it's
-        already checked (single-station switch, shift-click multi-select,
-        Set/Clear Home) used to leave you with a single fresh frame until
-        you flipped the checkbox off and back on. Call this from every one
-        of those paths instead."""
+        """Kick off history backfill if Auto-refresh is on. Called from the
+        cached/no-fetch display paths directly (nothing else will trigger
+        it for those), and from the end of on_overlays_ready() for every
+        other case — deliberately *after* a live fetch lands rather than
+        in parallel with it, so backfill's heavier 5-volume fetch doesn't
+        compete with the single live one for the same CPU/network right
+        when you're waiting to see the station you just switched to."""
         if self.auto_refresh_checkbox.isChecked():
             self._start_history_backfill()
 
-    def _active_backfill_stations(self) -> list:
+    def _active_stations(self) -> list:
+        """Whichever station(s) are actually selected right now: manual
+        multi-select > Home's closest-3 > the single station dropdown.
+        Same manual > home > single priority refresh_now() uses, shared
+        here so backfill and the live-fetch staleness checks agree with
+        it and with each other."""
         if self.manual_stations:
             return list(self.manual_stations)
         if self.home_active_stations:
@@ -643,7 +655,7 @@ class MainWindow(QMainWindow):
             # deferred backfill for the final selection.
             self._backfill_pending = True
             return
-        stations = self._active_backfill_stations()
+        stations = self._active_stations()
         self.status.showMessage(f"pulling recent history for {' + '.join(stations)}…")
         self.history_backfill_worker = HistoryBackfillWorker(stations, HISTORY_BACKFILL_COUNT)
         self.history_backfill_worker.finished_ok.connect(self.on_history_backfill_ready)
@@ -658,7 +670,7 @@ class MainWindow(QMainWindow):
     def on_history_backfill_ready(self, stations: list, per_station: dict):
         # Guard against the station/multi-select/Home selection changing
         # while the backfill was in flight — stale results just get dropped.
-        if set(self._active_backfill_stations()) != set(stations):
+        if set(self._active_stations()) != set(stations):
             return
 
         per_station_lists = [lst for lst in (per_station.get(s, []) for s in stations) if lst]
@@ -722,7 +734,6 @@ class MainWindow(QMainWindow):
             self.bridge.selectedStationsChanged.emit(json.dumps([]))
         self.reset_history()
         self.refresh_now()
-        self._maybe_backfill_on_station_change()
 
     def on_set_home_clicked(self):
         lat_text = self.home_lat_input.text().strip()
@@ -779,7 +790,6 @@ class MainWindow(QMainWindow):
         self.bridge.homeMarkerReady.emit(json.dumps({"lat": lat, "lon": lon}))
         self.reset_history()
         self.refresh_now()
-        self._maybe_backfill_on_station_change()
 
     def on_clear_home_clicked(self):
         self._disarm_home_selection()
@@ -793,7 +803,6 @@ class MainWindow(QMainWindow):
         self.bridge.homeMarkerCleared.emit()
         self.reset_history()
         self.refresh_now()
-        self._maybe_backfill_on_station_change()
 
     def on_cursor_moved(self, lat: float, lon: float):
         if self.home_lat is not None and self.home_lon is not None:
@@ -869,20 +878,22 @@ class MainWindow(QMainWindow):
 
     def refresh_now(self):
         if self.worker is not None and self.worker.isRunning():
+            # A fetch's already in flight (e.g. auto-refresh landed at the
+            # same moment you switched stations) — remember to run this
+            # again once it's done, for whatever's actually selected by
+            # then, instead of silently dropping the request. Without this,
+            # the in-flight worker's result (for the station you switched
+            # away from) still lands and, since nothing else fired for the
+            # new station, the map just keeps showing the old one.
+            self._refresh_pending = True
             return
-        selected_code = self.current_station()
-        if self.manual_stations:
-            stations = self.manual_stations
-        elif self.home_active_stations:
-            stations = self.home_active_stations
-        else:
-            stations = [selected_code]
-
+        stations = self._active_stations()
         self.status.showMessage(f"fetching {' + '.join(stations)}…")
         self.refresh_btn.setEnabled(False)
         self.worker = MultiRadarFetchWorker(stations)
         self.worker.finished_ok.connect(self.on_overlays_ready)
         self.worker.finished_err.connect(self.on_overlay_error)
+        self.worker.finished.connect(self._on_refresh_worker_finished)
         self.worker.finished.connect(lambda: self.refresh_btn.setEnabled(True))
         self.worker.start()
 
@@ -897,6 +908,11 @@ class MainWindow(QMainWindow):
                 self.warnings_worker = WarningsFetchWorker(meta["lat"], meta["lon"])
                 self.warnings_worker.finished_ok.connect(self.on_warnings_ready)
                 self.warnings_worker.start()
+
+    def _on_refresh_worker_finished(self):
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self.refresh_now()
 
     def _update_measured_refresh_interval(self, overlays: list):
         """Update self.auto_refresh_interval_sec from the real gap between this
@@ -923,6 +939,17 @@ class MainWindow(QMainWindow):
                     self.auto_timer.start(self.auto_refresh_interval_sec * 1000)
 
     def on_overlays_ready(self, overlays: list):
+        # Stale-result guard: refresh_now()'s busy-guard can defer a request
+        # rather than starting a fetch immediately (see _on_refresh_worker_finished),
+        # but an already-in-flight fetch for a station you've since switched
+        # away from can still land after the fact. Drop anything that no
+        # longer matches what's actually selected, rather than letting an
+        # old station's image get appended/displayed as if it were current.
+        active = set(self._active_stations())
+        overlays = [ov for ov in overlays if ov.station in active]
+        if not overlays:
+            return
+
         self._update_measured_refresh_interval(overlays)
 
         def _frame_key(frame):
@@ -935,6 +962,7 @@ class MainWindow(QMainWindow):
             # is a good guess, not a guarantee). Appending it anyway would
             # silently duplicate a history frame — identical content,
             # counted as a separate time step you could scrub "back" into.
+            self._maybe_backfill_on_station_change()
             return
 
         was_at_live = (self.history_index == -1) or (self.history_index == len(self.history) - 1)
@@ -958,6 +986,16 @@ class MainWindow(QMainWindow):
 
         if was_at_live and not self.play_timer.isActive():
             self._display_current_frame()
+
+        # Deferred to run only after the live frame has actually landed and
+        # rendered, rather than firing in parallel from every station-change
+        # call site — that raced the (heavier, 5-volume) backfill fetch
+        # against the single live one for the same CPU/network, and could
+        # leave the live frame visibly behind while backfill's grid+render
+        # work hogged the pipeline. Safe to call unconditionally here: it's
+        # a no-op when Auto-refresh is off, and coalesces harmlessly via
+        # _backfill_pending if one's already running.
+        self._maybe_backfill_on_station_change()
 
     def on_history_slider_changed(self, value: int):
         self.history_index = value

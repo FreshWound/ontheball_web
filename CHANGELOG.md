@@ -2,6 +2,44 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.16 — the "stuck on default station" bug, and why history backfill was slowing switches down
+
+- Fixed: `refresh_now()`'s "don't start a second fetch while one's
+  running" guard was silently *dropping* the request instead of
+  remembering it — same class of bug as the v0.10.13 backfill fix, just
+  never applied to the primary live-fetch path. With Auto-refresh
+  defaulting on and each grid+render taking 10-25s, switching stations
+  while a fetch was already in flight meant no fetch ever got dispatched
+  for the new station at all — Auto-refresh's own separate busy-guard
+  let backfill fire fine and pull the new station's *older* history, but
+  nothing asked for its live volume, so live silently stayed on whatever
+  station you switched away from until you happened to catch it between
+  fetches. `refresh_now()` now sets a pending flag and retries itself
+  once the in-flight fetch finishes, reading whatever's actually
+  selected *then* (mirrors `_start_history_backfill()`'s existing fix).
+- Added a belt-and-suspenders guard in `on_overlays_ready()`: even with
+  the fix above, an old in-flight fetch (for a station you've since
+  switched away from) can still land after the fact. Any overlay whose
+  station isn't part of the currently active selection now gets filtered
+  out before it's ever appended to history or displayed, instead of
+  silently corrupting the current view.
+- Also fixed the resulting slowness: history backfill was firing *in
+  parallel* with the live fetch at every station-change call site — one
+  live volume plus five backfill volumes, all grid+rendering at once,
+  competing for the same CPU right when you're waiting to see the
+  station you just picked. Backfill now only starts from the end of
+  `on_overlays_ready()`, strictly *after* the live frame has actually
+  landed and rendered, rather than racing it. `on_js_ready()` no longer
+  fires an immediate backfill in parallel with the very first load either
+  — same fix, applied to startup.
+- Still open: the blank-history-frame issue from the screenshots. This
+  round of fixes targets the station-switching race specifically: your
+  repro was single-station the whole time, so it's a separate root cause
+  I haven't pinned down yet. Worth retesting on this version in case it
+  was a downstream symptom of the same contention, but if it's still
+  reproducible, the debug-hover tool plus the terminal timing output
+  around that specific volume would be the next thing to look at.
+
 ## What's new in v0.10.15 — duplicate history frame on a repeat live poll
 
 - Fixed: `on_overlays_ready()` (every live refresh, manual or
