@@ -35,7 +35,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.19"
+__version__ = "0.10.20"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -787,8 +787,6 @@ class MainWindow(QMainWindow):
             return
 
         self.status.showMessage(f"loaded {added} recent frame(s) for {' + '.join(stations)}", 4000)
-
-        self.status.showMessage(f"loaded {len(new_frames)} recent frame(s) for {' + '.join(stations)}", 4000)
 
     def on_export_clicked(self):
         if self._export_in_progress:

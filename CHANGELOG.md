@@ -2,6 +2,18 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.20 — hotfix: crash in on_history_backfill_ready
+
+- Fixed a crash-on-startup regression from v0.10.19: a leftover duplicate
+  status line in `on_history_backfill_ready()` survived the
+  `_merge_frames_into_history()` refactor, still referencing the old
+  `new_frames` variable name that no longer existed in that function's
+  scope — `NameError` the moment a backfill actually completed. Caught
+  by `py_compile` alone since that only checks syntax, not whether every
+  name resolves at runtime; added `pyflakes` to the pre-ship check
+  (confirmed it flags this exact bug pattern immediately) so this class
+  of leftover-from-a-refactor bug gets caught before it ships, not after.
+
 ## What's new in v0.10.19 — faster tooltips, visible export progress, export frames actually kept
 
 - Tooltip wake-up delay cut from Qt's ~700ms default to 150ms app-wide
