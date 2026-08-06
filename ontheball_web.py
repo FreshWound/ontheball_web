@@ -14,6 +14,7 @@ import json
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,8 +26,8 @@ from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlo
 from PyQt6.QtGui import QDesktopServices, QIcon, QDoubleValidator, QImage
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QPushButton, QSlider, QStatusBar, QVBoxLayout,
-    QWidget,
+    QLineEdit, QMainWindow, QProxyStyle, QPushButton, QSlider, QStatusBar,
+    QStyle, QVBoxLayout, QWidget,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile
@@ -34,7 +35,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.18"
+__version__ = "0.10.19"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -47,7 +48,10 @@ PRODUCT_HOTKEYS = {       # lowercased JS e.key -> radar_source.PRODUCTS key
     "4": "differential_reflectivity", "z": "differential_reflectivity",
 }
 
-MAX_HISTORY = 12          # cap on cached in-session frames
+MAX_HISTORY = 30          # cap on cached in-session frames — must comfortably
+                           # fit a full EXPORT_FRAME_COUNT batch merged with
+                           # whatever else was already loaded, or the export's
+                           # extra volumes get truncated right back out again
 HISTORY_BACKFILL_COUNT = 5  # volumes pulled once when auto-refresh is turned on
 PLAYBACK_FRAME_MS = 600   # time each frame stays on screen during playback
 EXPORT_FRAME_COUNT = 20   # volumes pulled for a "Export loop" — deliberately more
@@ -280,6 +284,9 @@ class MainWindow(QMainWindow):
         self._export_frame_index = 0
         self._export_captured: list = []
         self._export_stations: list = []
+        self._export_fetch_started_at = None
+        self._export_progress_timer = QTimer(self)
+        self._export_progress_timer.timeout.connect(self._export_progress_tick)
 
         # Home location: entered fresh each session, never persisted to disk.
         # Purely a map marker + distance-from-cursor reference now — it no
@@ -729,27 +736,21 @@ class MainWindow(QMainWindow):
         common_len = min(len(lst) for lst in per_station_lists)
         return [[lst[i] for lst in per_station_lists] for i in range(common_len)]
 
-    def on_history_backfill_ready(self, stations: list, per_station: dict):
-        # Guard against the station/multi-select selection changing while
-        # the backfill was in flight — stale results just get dropped.
-        if set(self._active_stations()) != set(stations):
-            return
-
-        zipped_frames = self._zip_station_frames(stations, per_station)
-        if not zipped_frames:
-            self.status.showMessage(f"history backfill for {' + '.join(stations)} came back empty — try again shortly", 4000)
-            return
-
+    def _merge_frames_into_history(self, frames: list) -> int:
+        """Dedup `frames` against what's already in self.history and prepend
+        whatever's new, updating the slider/live-index bookkeeping. Shared
+        by live backfill and the export fetch — export deliberately pulls
+        more volumes than backfill does, and without this those extra
+        frames were just used for the video and then discarded, leaving
+        the playback slider back at whatever it had before. Returns how
+        many frames were actually new."""
         def _frame_key(frame):
             return frozenset((ov.station, _base_volume_time(ov.volume_time)) for ov in frame)
 
         existing_keys = {_frame_key(frame) for frame in self.history}
-        new_frames = [frame for frame in zipped_frames if _frame_key(frame) not in existing_keys]
+        new_frames = [frame for frame in frames if _frame_key(frame) not in existing_keys]
         if not new_frames:
-            self.status.showMessage(
-                f"{' + '.join(stations)}: already have the recent volumes — nothing new to backfill yet", 4000
-            )
-            return
+            return 0
 
         was_at_live = (self.history_index == -1) or (self.history_index == len(self.history) - 1)
         self.history = (new_frames + self.history)[-MAX_HISTORY:]
@@ -765,6 +766,27 @@ class MainWindow(QMainWindow):
         self.history_slider.setValue(self.history_index)
         self.history_slider.blockSignals(False)
         self._display_current_frame()
+        return len(new_frames)
+
+    def on_history_backfill_ready(self, stations: list, per_station: dict):
+        # Guard against the station/multi-select selection changing while
+        # the backfill was in flight — stale results just get dropped.
+        if set(self._active_stations()) != set(stations):
+            return
+
+        zipped_frames = self._zip_station_frames(stations, per_station)
+        if not zipped_frames:
+            self.status.showMessage(f"history backfill for {' + '.join(stations)} came back empty — try again shortly", 4000)
+            return
+
+        added = self._merge_frames_into_history(zipped_frames)
+        if added == 0:
+            self.status.showMessage(
+                f"{' + '.join(stations)}: already have the recent volumes — nothing new to backfill yet", 4000
+            )
+            return
+
+        self.status.showMessage(f"loaded {added} recent frame(s) for {' + '.join(stations)}", 4000)
 
         self.status.showMessage(f"loaded {len(new_frames)} recent frame(s) for {' + '.join(stations)}", 4000)
 
@@ -784,12 +806,26 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.export_btn.setText("Fetching…")
         self.status.showMessage(f"fetching {EXPORT_FRAME_COUNT} volumes for export ({' + '.join(stations)})…")
+        self._export_fetch_started_at = time.monotonic()
+        self._export_progress_timer.start(4000)
 
         self._export_fetch_worker = HistoryBackfillWorker(stations, EXPORT_FRAME_COUNT)
         self._export_fetch_worker.finished_ok.connect(self.on_export_frames_ready)
         self._export_fetch_worker.start()
 
+    def _export_progress_tick(self):
+        # Re-asserts itself every few seconds so an unrelated status message
+        # (auto-refresh ticking on another station's-worth of work, a hover
+        # readout, whatever) can't silently bury this and leave you wondering
+        # whether a multi-minute fetch of 20 volumes is actually still going.
+        elapsed = int(time.monotonic() - self._export_fetch_started_at) if self._export_fetch_started_at else 0
+        self.status.showMessage(
+            f"still fetching {EXPORT_FRAME_COUNT} volumes for export "
+            f"({' + '.join(self._export_stations)})… {elapsed}s elapsed, this can take a couple minutes"
+        )
+
     def on_export_frames_ready(self, stations: list, per_station: dict):
+        self._export_progress_timer.stop()
         if set(self._active_stations()) != set(stations):
             # Selection changed while the fetch was in flight — bail rather
             # than exporting a station you've since navigated away from.
@@ -802,6 +838,10 @@ class MainWindow(QMainWindow):
             self.status.showMessage(f"export fetch for {' + '.join(stations)} didn't return enough volumes — try again shortly", 5000)
             self._reset_export_ui()
             return
+
+        added = self._merge_frames_into_history(frames)
+        if added:
+            self.status.showMessage(f"added {added} frame(s) to history — starting export render…", 4000)
 
         self._export_frames = frames
         self._export_frame_index = 0
@@ -867,9 +907,23 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            self.status.showMessage(f"encoding {len(self._export_captured)} frames to video…")
+            self.export_btn.setText("Encoding 0%…")
+            QApplication.processEvents()
+            total = len(self._export_captured)
             with imageio.get_writer(path_str, fps=EXPORT_FPS, macro_block_size=None) as writer:
-                for frame in self._export_captured:
+                for i, frame in enumerate(self._export_captured):
                     writer.append_data(frame)
+                    pct = round((i + 1) / total * 100)
+                    self.export_btn.setText(f"Encoding {pct}%…")
+                    self.status.showMessage(f"encoding video — frame {i + 1}/{total}")
+                    # append_data() blocks the event loop for that frame's
+                    # encode; without this, none of the status/button text
+                    # above actually gets painted until the whole loop below
+                    # finishes — which is exactly what looked like the export
+                    # "just disappearing" for a couple minutes with no
+                    # feedback while it was actually still working.
+                    QApplication.processEvents()
         except Exception as exc:  # noqa: BLE001
             self.status.showMessage(f"export failed while encoding: {exc.__class__.__name__}: {exc}", 6000)
             self._reset_export_ui()
@@ -880,6 +934,7 @@ class MainWindow(QMainWindow):
         self._reset_export_ui()
 
     def _reset_export_ui(self):
+        self._export_progress_timer.stop()
         self._export_in_progress = False
         self._export_frames = []
         self._export_captured = []
@@ -1370,9 +1425,20 @@ class MainWindow(QMainWindow):
         self.bridge.warningsReady.emit(json.dumps(geojson))
 
 
+class FastTooltipStyle(QProxyStyle):
+    """Qt's default tooltip wake-up delay (~700ms) makes the Shortcuts
+    tooltip feel sluggish for something meant to be a quick glance-and-go
+    reference. Cuts it down app-wide."""
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.StyleHint.SH_ToolTip_WakeUpDelay:
+            return 150
+        return super().styleHint(hint, option, widget, returnData)
+
+
 def main():
     start_local_server(ASSETS_DIR, HTTP_PORT)
     app = QApplication(sys.argv)
+    app.setStyle(FastTooltipStyle(app.style()))
     if LOGO_PATH.exists():
         app.setWindowIcon(QIcon(str(LOGO_PATH)))
     win = MainWindow()

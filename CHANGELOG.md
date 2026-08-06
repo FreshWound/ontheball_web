@@ -2,6 +2,33 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.19 — faster tooltips, visible export progress, export frames actually kept
+
+- Tooltip wake-up delay cut from Qt's ~700ms default to 150ms app-wide
+  (`FastTooltipStyle`, a small `QProxyStyle` override) — the Shortcuts
+  tooltip specifically was too sluggish for something meant to be a
+  quick glance.
+- Fixed the silent multi-minute gap during export: the transcode step
+  (`imageio.get_writer` + `append_data()` per frame) blocks the Qt event
+  loop, so any status message shown right before it started didn't
+  actually get painted until the whole encode finished — looked exactly
+  like the export had hung. Now calls `QApplication.processEvents()`
+  after every frame during both the fetch-progress and the encode step,
+  with real "Encoding 43%…" / "frame 12/20" text instead of one message
+  that appears to just disappear. The fetch phase also got a repeating
+  status re-assert every 4s (with elapsed-seconds shown) — a long fetch
+  is exactly the kind of thing an unrelated status message (auto-refresh
+  ticking elsewhere, a hover readout) could silently bury before.
+- Fixed: the 20 volumes export pulls were used for the video and then
+  discarded — the playback slider was still stuck at whatever 5-12
+  frames it had before, none of the extra history stuck around.
+  Extracted the merge-into-`self.history` logic (dedup + prepend +
+  slider bookkeeping) that history backfill already did into a shared
+  `_merge_frames_into_history()`, and export now calls it too before
+  rendering. Bumped `MAX_HISTORY` from 12 to 30 so a full 20-frame export
+  batch doesn't immediately get truncated back out by the cap the moment
+  it's merged in.
+
 ## What's new in v0.10.18 — export playback as MP4, hotkey tooltip
 
 - New **Export…** button next to the history slider. Pulls
