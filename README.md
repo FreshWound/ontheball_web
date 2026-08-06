@@ -1,4 +1,4 @@
-# ontheball — web basemap prototype (v0.10.17)
+# ontheball — web basemap prototype (v0.10.18)
 
 ![ontheball screenshot — reflectivity overlay on KUEX with an active NWS warning polygon](assets/img/screenshot.png)
 
@@ -68,8 +68,12 @@ overlay — hovering the map shows the real value under the cursor
 highlighted on the legend. Shift-click station markers to view several
 at once. Enter a Home Location (or click the map) to place a marker and
 see live distance-from-cursor readouts — it's just a reference point, not
-a station picker. The basemap itself is loaded live from OpenFreeMap
-(`tiles.openfreemap.org`) — needs your normal internet access, no API key.
+a station picker. In-session history builds up automatically with
+Auto-refresh on (or step through it with the Left/Right arrow keys — see
+the ⌨ Shortcuts tooltip for the full list); hit Export… to pull a fuller
+stretch of history and save it as an MP4 loop. The basemap itself is
+loaded live from OpenFreeMap (`tiles.openfreemap.org`) — needs your
+normal internet access, no API key.
 
 <!--
 MAINTENANCE NOTE: Install (one-time) and Run stay as the first two

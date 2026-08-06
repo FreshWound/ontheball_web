@@ -7,3 +7,5 @@ matplotlib
 cmweather
 scipy
 pyproj
+imageio
+imageio-ffmpeg

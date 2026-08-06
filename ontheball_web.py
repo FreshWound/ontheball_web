@@ -18,11 +18,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+import imageio.v2 as imageio
+
 from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QIcon, QDoubleValidator
+from PyQt6.QtGui import QDesktopServices, QIcon, QDoubleValidator, QImage
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QSlider, QStatusBar, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
+    QLineEdit, QMainWindow, QPushButton, QSlider, QStatusBar, QVBoxLayout,
+    QWidget,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile
@@ -30,7 +34,7 @@ from PyQt6.QtWebChannel import QWebChannel
 
 import radar_source
 
-__version__ = "0.10.17"
+__version__ = "0.10.18"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "img" / "logo.png"
@@ -46,6 +50,20 @@ PRODUCT_HOTKEYS = {       # lowercased JS e.key -> radar_source.PRODUCTS key
 MAX_HISTORY = 12          # cap on cached in-session frames
 HISTORY_BACKFILL_COUNT = 5  # volumes pulled once when auto-refresh is turned on
 PLAYBACK_FRAME_MS = 600   # time each frame stays on screen during playback
+EXPORT_FRAME_COUNT = 20   # volumes pulled for a "Export loop" — deliberately more
+                           # than the in-session backfill, since the export is meant
+                           # to show a fuller stretch of storm evolution than the
+                           # live playback slider needs day-to-day
+EXPORT_RENDER_WAIT_MS = 500  # pause after pushing a frame to the map before the
+                              # screenshot is taken, giving the browser time to
+                              # actually decode + paint the new image. Untested on
+                              # real hardware — bump this if exported frames look
+                              # like they're lagging a step behind, or the export
+                              # feels unnecessarily slow if it turns out to be
+                              # overkill.
+EXPORT_FPS = 2             # playback speed of the exported video — independent of
+                           # PLAYBACK_FRAME_MS; a smoother-feeling pace for a video
+                           # a stranger will watch than what works for in-app scrubbing
 DEFAULT_REFRESH_INTERVAL_SEC = 300   # used until we've measured a station's actual cadence
 MIN_REFRESH_INTERVAL_SEC = 60        # floor, so a fast-cycling station can't cause hammering
 MAX_REFRESH_INTERVAL_SEC = 900       # ceiling, in case of a bad/stale reading
@@ -252,6 +270,17 @@ class MainWindow(QMainWindow):
         self._backfill_pending = False
         self._pre_toggle_opacity = None
 
+        # Export-to-video state — a completely separate fetch from the live
+        # self.history/history_index the playback slider uses, so exporting
+        # never touches what's on screen except during the brief render loop
+        # itself (restored via _display_current_frame() when it finishes).
+        self._export_fetch_worker = None
+        self._export_in_progress = False
+        self._export_frames: list = []
+        self._export_frame_index = 0
+        self._export_captured: list = []
+        self._export_stations: list = []
+
         # Home location: entered fresh each session, never persisted to disk.
         # Purely a map marker + distance-from-cursor reference now — it no
         # longer selects which station(s) are being viewed (shift-click
@@ -358,6 +387,21 @@ class MainWindow(QMainWindow):
             "reproducing a value/legend mismatch, off when done."
         )
         controls.addWidget(self.debug_hover_checkbox)
+
+        shortcuts_label = QLabel("⌨ Shortcuts")
+        shortcuts_label.setStyleSheet("color: palette(mid);")
+        shortcuts_label.setToolTip(
+            "<b>Keyboard shortcuts</b> (click the map first so it has focus)<br>"
+            "<table cellspacing='4'>"
+            "<tr><td><b>1&nbsp;&nbsp;/&nbsp;B</b></td><td>Reflectivity</td></tr>"
+            "<tr><td><b>2&nbsp;&nbsp;/&nbsp;V</b></td><td>Base Velocity</td></tr>"
+            "<tr><td><b>3&nbsp;&nbsp;/&nbsp;C</b></td><td>Correlation Coefficient</td></tr>"
+            "<tr><td><b>4&nbsp;&nbsp;/&nbsp;Z</b></td><td>Differential Reflectivity (ZDR)</td></tr>"
+            "<tr><td><b>&larr;&nbsp;/&nbsp;&rarr;</b></td><td>Step playback one frame</td></tr>"
+            "<tr><td><b>`</b> (backtick)</td><td>Toggle radar opacity to 0 and back</td></tr>"
+            "</table>"
+        )
+        controls.addWidget(shortcuts_label)
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -411,6 +455,15 @@ class MainWindow(QMainWindow):
         self.history_label = QLabel("no frames yet")
         self.history_label.setMinimumWidth(220)
         history_controls.addWidget(self.history_label)
+
+        self.export_btn = QPushButton("Export…")
+        self.export_btn.setToolTip(
+            "Fetch an extra stretch of history and save it as an MP4 loop — "
+            "independent of what's currently in the playback slider above."
+        )
+        self.export_btn.clicked.connect(self.on_export_clicked)
+        history_controls.addWidget(self.export_btn)
+
         layout.addLayout(history_controls)
 
         self.view = QWebEngineView()
@@ -662,22 +715,30 @@ class MainWindow(QMainWindow):
             self._backfill_pending = False
             self._start_history_backfill()
 
+    def _zip_station_frames(self, stations: list, per_station: dict) -> list:
+        """Zip each station's independently-fetched overlay list into frames
+        by position — frame i across stations counts as one time-slice — the
+        same convention live multi-station refreshes already use, since
+        stations don't necessarily share a scan cadence and there's no
+        single "N minutes ago" that lines up across all of them. Shared by
+        history backfill and export, which both do this same fetch shape at
+        different volume counts."""
+        per_station_lists = [lst for lst in (per_station.get(s, []) for s in stations) if lst]
+        if not per_station_lists:
+            return []
+        common_len = min(len(lst) for lst in per_station_lists)
+        return [[lst[i] for lst in per_station_lists] for i in range(common_len)]
+
     def on_history_backfill_ready(self, stations: list, per_station: dict):
         # Guard against the station/multi-select selection changing while
         # the backfill was in flight — stale results just get dropped.
         if set(self._active_stations()) != set(stations):
             return
 
-        per_station_lists = [lst for lst in (per_station.get(s, []) for s in stations) if lst]
-        if not per_station_lists:
+        zipped_frames = self._zip_station_frames(stations, per_station)
+        if not zipped_frames:
             self.status.showMessage(f"history backfill for {' + '.join(stations)} came back empty — try again shortly", 4000)
             return
-
-        # Zip by position, not by matching timestamps — stations don't
-        # necessarily share a scan cadence, so "N steps back" per station is
-        # the same approximation live multi-station frames already rely on.
-        common_len = min(len(lst) for lst in per_station_lists)
-        zipped_frames = [[lst[i] for lst in per_station_lists] for i in range(common_len)]
 
         def _frame_key(frame):
             return frozenset((ov.station, _base_volume_time(ov.volume_time)) for ov in frame)
@@ -706,6 +767,125 @@ class MainWindow(QMainWindow):
         self._display_current_frame()
 
         self.status.showMessage(f"loaded {len(new_frames)} recent frame(s) for {' + '.join(stations)}", 4000)
+
+    def on_export_clicked(self):
+        if self._export_in_progress:
+            self.status.showMessage("export already running…", 3000)
+            return
+        if not self.history:
+            self.status.showMessage("nothing loaded yet to export", 3000)
+            return
+        if self._export_fetch_worker is not None and self._export_fetch_worker.isRunning():
+            self.status.showMessage("export fetch already running…", 3000)
+            return
+
+        stations = self._active_stations()
+        self._export_stations = stations
+        self.export_btn.setEnabled(False)
+        self.export_btn.setText("Fetching…")
+        self.status.showMessage(f"fetching {EXPORT_FRAME_COUNT} volumes for export ({' + '.join(stations)})…")
+
+        self._export_fetch_worker = HistoryBackfillWorker(stations, EXPORT_FRAME_COUNT)
+        self._export_fetch_worker.finished_ok.connect(self.on_export_frames_ready)
+        self._export_fetch_worker.start()
+
+    def on_export_frames_ready(self, stations: list, per_station: dict):
+        if set(self._active_stations()) != set(stations):
+            # Selection changed while the fetch was in flight — bail rather
+            # than exporting a station you've since navigated away from.
+            self.status.showMessage("export cancelled — selection changed while fetching", 4000)
+            self._reset_export_ui()
+            return
+
+        frames = self._zip_station_frames(stations, per_station)
+        if len(frames) < 2:
+            self.status.showMessage(f"export fetch for {' + '.join(stations)} didn't return enough volumes — try again shortly", 5000)
+            self._reset_export_ui()
+            return
+
+        self._export_frames = frames
+        self._export_frame_index = 0
+        self._export_captured = []
+        self._export_in_progress = True
+        self.export_btn.setText(f"Exporting 0/{len(frames)}…")
+        self._export_render_next_frame()
+
+    def _export_render_next_frame(self):
+        if self._export_frame_index >= len(self._export_frames):
+            self._finish_export()
+            return
+        frame = self._export_frames[self._export_frame_index]
+        self._emit_overlays(frame)
+        self.export_btn.setText(f"Exporting {self._export_frame_index + 1}/{len(self._export_frames)}…")
+        # Give the browser a moment to actually decode + paint the new PNG
+        # before grabbing a screenshot — pushing overlaysReady doesn't mean
+        # MapLibre has finished updating the texture yet. See
+        # EXPORT_RENDER_WAIT_MS above if captured frames look like they're
+        # lagging a step behind once you've actually tried this.
+        QTimer.singleShot(EXPORT_RENDER_WAIT_MS, self._export_capture_current_frame)
+
+    def _export_capture_current_frame(self):
+        pixmap = self.view.grab()
+        image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
+        width, height = image.width(), image.height()
+        # H.264 needs even dimensions (yuv420p chroma subsampling) — trim a
+        # stray odd pixel off rather than let the encoder choke on it.
+        width -= width % 2
+        height -= height % 2
+        ptr = image.constBits()
+        ptr.setsize(image.height() * image.bytesPerLine())
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((image.height(), image.bytesPerLine()))
+        arr = arr[:height, :width * 3].reshape((height, width, 3))
+        self._export_captured.append(arr.copy())
+
+        self._export_frame_index += 1
+        self._export_render_next_frame()
+
+    def _finish_export(self):
+        # Restore whatever the live view was actually showing — the frames
+        # above were pushed straight through _emit_overlays(), never
+        # touching self.history/history_index, so this just redisplays what
+        # was already there.
+        self._display_current_frame()
+
+        if len(self._export_captured) < 2:
+            self.status.showMessage("export failed — not enough frames captured", 5000)
+            self._reset_export_ui()
+            return
+
+        default_dir = Path.home() / "Downloads" / "ontheball-exports"
+        default_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"ontheball_{'-'.join(self._export_stations)}_{timestamp}.mp4"
+
+        path_str, _ = QFileDialog.getSaveFileName(
+            self, "Save radar export", str(default_dir / default_name), "MP4 video (*.mp4)"
+        )
+        if not path_str:
+            self.status.showMessage("export cancelled", 3000)
+            self._reset_export_ui()
+            return
+
+        try:
+            with imageio.get_writer(path_str, fps=EXPORT_FPS, macro_block_size=None) as writer:
+                for frame in self._export_captured:
+                    writer.append_data(frame)
+        except Exception as exc:  # noqa: BLE001
+            self.status.showMessage(f"export failed while encoding: {exc.__class__.__name__}: {exc}", 6000)
+            self._reset_export_ui()
+            return
+
+        self.status.showMessage(f"exported {len(self._export_captured)} frames to {path_str}", 6000)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path_str).parent)))
+        self._reset_export_ui()
+
+    def _reset_export_ui(self):
+        self._export_in_progress = False
+        self._export_frames = []
+        self._export_captured = []
+        self._export_frame_index = 0
+        self.export_btn.setEnabled(True)
+        self.export_btn.setText("Export…")
 
     def on_detail_mode_toggled(self, checked: bool):
         radar_source.set_smoothing_mode(checked)

@@ -2,6 +2,42 @@
 
 Version-by-version history of what changed and why. See [README.md](README.md) for install/run instructions.
 
+## What's new in v0.10.18 — export playback as MP4, hotkey tooltip
+
+- New **Export…** button next to the history slider. Pulls
+  `EXPORT_FRAME_COUNT` (20) volumes — deliberately more than the
+  in-session backfill's 5, since the export is meant to show a fuller
+  stretch of storm evolution than the live playback slider needs day to
+  day — via the same `HistoryBackfillWorker`/`_zip_station_frames()` path
+  history backfill already uses, completely independent of
+  `self.history`. Then steps through those frames on the actual map
+  (basemap, radar overlay, warning polygons, legend — everything you'd
+  see live), screenshotting each one via `QWebEngineView.grab()`, and
+  encodes them into an MP4 with `imageio` + `imageio-ffmpeg`.
+- Deliberately **not GIF**: color banding on radar gradients would look
+  bad, and video compresses much better for something with this much
+  smooth gradient. Deliberately **not system ffmpeg** either —
+  `imageio-ffmpeg` bundles a static ffmpeg binary right in the pip
+  wheel, so `requirements.txt` stays the single source of truth and
+  nobody testing this needs `apt install ffmpeg` first. Verified the
+  full screenshot → numpy → MP4 pipeline end-to-end in a headless Qt
+  session before shipping this (odd-dimension trimming for H.264's
+  even-dimension requirement, and reading the resulting file back
+  frame-by-frame to confirm it's genuinely valid) — the one piece I
+  couldn't verify here is `QWebEngineView.grab()` specifically on real
+  hardware with a real GPU/compositor, so that's the first thing worth
+  checking once this is actually running.
+- Saves to `~/Downloads/ontheball-exports/` by default (deliberately
+  **not** inside the repo — a stray `git add .` down the road could
+  otherwise commit MP4s into version control) via a normal save dialog,
+  so it's easy to redirect per-export if wanted. Opens the containing
+  folder once the export finishes.
+- Added a "⌨ Shortcuts" label (top controls row) with a rich tooltip
+  listing every hotkey — they've been fully invisible to anyone who
+  doesn't already know they exist since v0.10.6 added the first ones.
+- New dependencies: `imageio`, `imageio-ffmpeg` — both added to
+  `requirements.txt`.
+
 ## What's new in v0.10.17 — Home Location no longer selects stations
 
 - Home Location is now purely a map marker plus the distance-from-cursor
